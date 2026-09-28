@@ -52,7 +52,12 @@ Editá `scene.json` siguiendo [references/scene-format.md](references/scene-form
   - pide variantes o **retoques por prompt**.
 - Esos pedidos los resuelve solo la cola del server, con `claude -p` headless (modelo `meta.generatorModel`, hasta `meta.maxVariants` por pedido).
 - Cuando el usuario te pida seguir desde el chat, arrancá con `comic status <dir>`: resume lo aprobado, lo rechazado con sus motivos, las notas, lo desactualizado y los pedidos abiertos o fallidos.
-- Cambios grandes (rehacer la maqueta, sumar escenas, efectos custom nuevos) los hacés vos editando `scene.json`. El panel se recarga solo. Si el panel tenía un cambio sin guardar, su guardado choca (409) y recarga tu versión, sin pisarla.
+- **Lo aprobado se respeta.** Antes de cambiar algo desde el chat:
+  1. Corré `comic status` y armá el plan de cambios: qué escenas o clips vas a regenerar o editar, por qué, y cuáles están aprobados.
+  2. Decíselo al usuario en pocas líneas ("voy a regenerar X e Y por tal motivo; A y B están aprobadas y no las toco") y **esperá su OK**.
+  3. Lo aprobado no se toca salvo que el usuario lo nombre explícitamente. Aun así, el cambio va como **variante nueva**: la aprobada queda intacta para comparar.
+  4. Si cambiás el motor de la skill (player, presets, render) de una forma que altera cómo se ve algo ya aprobado, avisalo. `approvedHash` solo detecta cambios en el JSON.
+- Cambios grandes (rehacer la maqueta, sumar escenas, efectos custom nuevos) los hacés vos editando `scene.json`, siguiendo la regla anterior. El panel se recarga solo. Si el panel tenía un cambio sin guardar, su guardado choca (409) y recarga tu versión, sin pisarla.
 - Al crear variantes a mano, usá la memoria de revisión igual que el generador: conservá las `note` y evitá las `rejection`.
 
 ### 6. Exportar
