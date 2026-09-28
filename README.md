@@ -119,7 +119,7 @@ node ~/.claude/skills/comic-motion/bin/comic.js <comando>
   presets                             catálogo de presets y parámetros
   snapshot <dir> --t 0.5,2,3.4        cuadros PNG sueltos
   studio <dir> [--port 4777] [--open] panel de revisión
-  render <dir> [--quality 1080|4k] [--codec h264|prores] [--from s --to s]
+  render <dir> [--quality 1080|4k] [--codec h264|prores] [--fps 24|30|60] [--from s --to s]
 ```
 
 ## Un proyecto por dentro
@@ -164,7 +164,7 @@ Aparece solo en el panel. La única regla: todo tiene que depender del tiempo `t
 
 ## Exportar
 
-Desde el botón **Exportar video** del panel (o `comic render`) elegís resolución (1080p o 4K), formato (MP4 H.264 o ProRes) y tramo (todo o el loop marcado). El render corre cuadro por cuadro con el mismo player que el preview, así que lo que aprobaste es exactamente lo que sale.
+Desde el botón **Exportar video** del panel (o `comic render`) elegís resolución (1080p o 4K), formato (MP4 H.264 o ProRes), y tramo (todo o el loop marcado). Los **cuadros por segundo** (24, 30 o 60) son configuración del proyecto: se eligen en la barra superior del panel y tanto el preview como el export los respetan. El render corre cuadro por cuadro con el mismo player que el preview, así que lo que aprobaste es exactamente lo que sale.
 
 ![Export: diálogo, progreso y resultado](docs/export.gif)
 

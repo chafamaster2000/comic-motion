@@ -335,7 +335,10 @@ export function createPlayer(root, opts) {
         return;
       }
     }
-    render(t);
+    // el preview avanza de a cuadros del proyecto: lo que se ve es lo que se exporta
+    const fps = scene.meta.fps || 24;
+    const tq = Math.floor(t * fps + 1e-6) / fps;
+    if (tq !== time) render(tq);
     raf = requestAnimationFrame(tick);
   }
 

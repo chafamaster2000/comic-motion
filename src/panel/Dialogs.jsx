@@ -56,6 +56,10 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation 
             </div>
           </label>
           <label>
+            <span>Cuadros/s</span>
+            <span className="dim">{scene.meta.fps || 24} fps · se configura arriba, en la barra del proyecto</span>
+          </label>
+          <label>
             <span>Tramo</span>
             <div className="seg">
               <button className={range === 'all' ? 'on' : ''} onClick={() => setRange('all')} disabled={running}>

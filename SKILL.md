@@ -63,6 +63,7 @@ comic render <dir> --quality 1080|4k [--codec prores] [--from s --to s]
 ```
 
 - Lo que se exporta es lo **activo**. El panel avisa si hay escenas sin aprobar.
+- Los **cuadros por segundo** son configuración del proyecto (`meta.fps`: 24, 30 o 60). Se eligen en la barra superior del panel (o con `init --fps`) y tanto el preview como el export usan ese fps. 24 da una sensación más de cómic o cine; 60 hace los paneos más fluidos y tarda unas 2,5 veces más en exportar.
 - Referencia en una Mac Apple Silicon con GPU: 1080p ≈ 2,2 veces el tiempo real y 4K ≈ 7 veces.
 
 **Terminado cuando:** el archivo existe en `exports/`, extrajiste 2 o 3 cuadros con ffmpeg y los miraste, y le pasaste al usuario la ruta y los cuadros.

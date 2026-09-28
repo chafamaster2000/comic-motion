@@ -43,7 +43,7 @@ const HELP = `comic <comando> <proyecto> [opciones]
   presets                             catálogo de presets y params (markdown)
   snapshot <dir> --t 0.5,2,3.4 [--scale 0.5] [--scene s2]   cuadros PNG para mirar
   studio <dir> [--port 4777] [--open]   levanta el panel
-  render <dir> [--quality 1080|4k] [--codec h264|prores] [--from s --to s] [--out f.mp4]`;
+  render <dir> [--quality 1080|4k] [--codec h264|prores] [--fps 24|30|60] [--from s --to s] [--out f.mp4]`;
 
 async function withServer(dir, fn) {
   ensureBuilt();
@@ -192,6 +192,7 @@ async function main() {
         outFile: out,
         quality: q,
         codec: flags.codec || 'h264',
+        fps: flags.fps ? +flags.fps : undefined,
         from: flags.from ? +flags.from : 0,
         to: flags.to ? +flags.to : undefined,
         onProgress: (p) => {

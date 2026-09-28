@@ -160,3 +160,6 @@ select, input[type=text], input[type=number], textarea.json { background: var(--
 .req-row.error { border-left: 3px solid var(--red); } .req-row.running { border-left: 3px solid var(--acc); } .req-row.done { border-left: 3px solid var(--green); }
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--bg3); border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px; z-index: 30; max-width: 560px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
 .toast.warn { border-color: var(--amber); } .toast.error { border-color: var(--red); }
+
+.fps-pick select { background: var(--bg3); border: 1px solid var(--line); border-radius: 99px; padding: 2px 8px; font-size: 12px; cursor: pointer; }
+.fps-pick select:hover { border-color: var(--acc); }

@@ -35,10 +35,10 @@ async function openPage(serverUrl, meta, scale) {
 }
 
 // quality: '1080' | '4k'  → escala del devicePixelRatio relativo a meta.width
-export async function renderVideo({ serverUrl, meta, outFile, quality = '1080', codec = 'h264', from = 0, to, onProgress, shouldStop }) {
+export async function renderVideo({ serverUrl, meta, outFile, quality = '1080', codec = 'h264', fps: fpsOverride, from = 0, to, onProgress, shouldStop }) {
   const scale = quality === '4k' ? 3840 / meta.width : 1920 / meta.width;
   const { browser, page, info, logs, shot } = await openPage(serverUrl, meta, scale);
-  const fps = meta.fps || 24;
+  const fps = fpsOverride || meta.fps || 24;
   const end = Math.min(to ?? info.duration, info.duration);
   const frames = Math.max(1, Math.round((end - from) * fps));
   const c = CODECS[codec] || CODECS.h264;

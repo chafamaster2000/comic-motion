@@ -151,8 +151,18 @@ export function App() {
           <span className="logo">¡POW!</span>
           <span className="title">{scene.meta.title}</span>
           <span className="dim">
-            {scene.meta.width}×{scene.meta.height} · {fps} fps · {duration.toFixed(2)}s
+            {scene.meta.width}×{scene.meta.height} · {duration.toFixed(2)}s
           </span>
+          <label className="fps-pick" title="Configuración del proyecto: el preview y el export usan este fps">
+            <select value={fps} onChange={(e) => studio.edit((s) => (s.meta.fps = +e.target.value))}>
+              {[24, 30, 60].map((f) => (
+                <option key={f} value={f}>
+                  {f} fps
+                </option>
+              ))}
+              {![24, 30, 60].includes(fps) && <option value={fps}>{fps} fps</option>}
+            </select>
+          </label>
         </div>
         <div className="top-right">
           <span className={'pill ' + (validation.errors.length ? 'bad' : 'ok')} title={[...validation.errors, ...validation.warnings].join('\n') || 'sin problemas'}>
