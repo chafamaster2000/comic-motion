@@ -72,5 +72,5 @@ comic render <dir> --quality 1080|4k [--codec prores] [--from s --to s]
 Cuando ningún preset alcanza, escribí `effects/<id>.js` en el proyecto con el contrato de la sección "Efectos custom" de `scene-format.md`. Aparece solo en el panel. Todo tiene que ser función del tiempo `t` (nada de `Math.random` ni animaciones CSS), porque si no el export no coincide con el preview.
 
 ## Opcionales
-- **Profundidad 2.5D:** `comic cutout <dir> <asset>` (BiRefNet_lite, MIT, corre en JS) y después `depth` de 0.06 a 0.15 en la viñeta.
+- **Profundidad 2.5D:** `comic cutout <dir> <asset>` (BiRefNet_lite, MIT, corre en JS) genera el recorte del personaje y un fondo sin personajes (`bgfill`). Después va `depth` de 0.06 a 0.15 en la viñeta. Revisá el último cuadro de la escena: si algo del frente se recortó de más (textos, objetos), bajá `depth`.
 - **Pixel art:** `pixelated: true` en la viñeta, para que al escalar no se vea borroso.

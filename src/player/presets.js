@@ -419,7 +419,8 @@ const panel = {
     if (!asset) {
       media.append(el('div', null, { position: 'absolute', inset: 0, background: 'repeating-linear-gradient(45deg,#eee 0 20px,#ddd 20px 40px)' }));
     } else {
-      const base = makeMedia(ctx.assetUrl(asset));
+      // con profundidad y fondo rellenado, el fondo va sin personajes: no quedan fantasmas
+      const base = makeMedia(p.depth && asset.bgfill && asset.type !== 'video' ? ctx.fileUrl(asset.bgfill) : ctx.assetUrl(asset));
       media.append(base);
       layers.push({ img: base, depth: 0.5 });
       if (p.depth && asset.cutout) {

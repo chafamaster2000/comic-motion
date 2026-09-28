@@ -178,7 +178,7 @@ Medido con GPU en Apple Silicon: 1080p ≈ 2 a 3 veces el tiempo real y 4K ≈ 7
 
 - Sin audio: el export sale mudo.
 - La detección de viñetas asume canaletas de un color parejo. Si las viñetas se tocan, Claude corrige los recortes mirando el overlay.
-- El recorte 2.5D no rellena el hueco del fondo. Funciona bien con movimientos chicos.
+- En la profundidad 2.5D, el hueco que dejan los personajes se rellena con un fondo difuso (en JS, sin IA). Tapa los fantasmas, pero en movimientos muy grandes puede verse el borrón.
 - Probado en macOS. Windows y Linux están soportados por el instalador, pero tienen menos horas de uso.
 
 ## Licencias

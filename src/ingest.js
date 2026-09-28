@@ -213,5 +213,79 @@ export async function cutout(project, scene, assetId, { model = 'onnx-community/
     .png()
     .toFile(outFile);
   a.cutout = path.relative(project.dir, outFile);
-  return { file: a.cutout, model };
+  const fill = path.join(project.dir, 'assets', `${assetId}.bgfill.png`);
+  await fillBackground(file, outFile, fill);
+  a.bgfill = path.relative(project.dir, fill);
+  return { file: a.cutout, bgfill: a.bgfill, model };
+}
+
+// Fondo sin personajes para la profundidad 2.5D: rellena el hueco del recorte con los colores
+// del entorno (convolución normalizada a varias escalas). Así, cuando la capa del frente se mueve,
+// lo que asoma es fondo difuso y no una copia nítida del personaje.
+export async function fillBackground(file, cutoutFile, outFile) {
+  const { width: W, height: H } = await sharp(file).metadata();
+  const sw = Math.max(64, Math.round(W / 4));
+  const sh = Math.max(64, Math.round(H / 4));
+  const img = await sharp(file).removeAlpha().resize(sw, sh).raw().toBuffer();
+  const alpha = await sharp(cutoutFile).ensureAlpha().extractChannel(3).resize(sw, sh).raw().toBuffer();
+  const n = sw * sh;
+  // máscara dilatada (~24px a escala completa) para tapar también el borde del personaje
+  let m = new Float32Array(n);
+  for (let i = 0; i < n; i++) m[i] = alpha[i] > 25 ? 1 : 0;
+  m = boxBlur(m, sw, sh, 6, 1);
+  const K = new Float32Array(n);
+  for (let i = 0; i < n; i++) K[i] = m[i] > 0.02 ? 0 : 1;
+  const fill = new Float32Array(n * 3);
+  const done = new Uint8Array(n);
+  for (const r of [6, 16, 40, 100]) {
+    const B = boxBlur(K, sw, sh, r, 3);
+    const A = [0, 1, 2].map((c) => {
+      const ch = new Float32Array(n);
+      for (let i = 0; i < n; i++) ch[i] = img[i * 3 + c] * K[i];
+      return boxBlur(ch, sw, sh, r, 3);
+    });
+    for (let i = 0; i < n; i++) {
+      if (done[i] || B[i] < 0.05) continue;
+      for (let c = 0; c < 3; c++) fill[i * 3 + c] = A[c][i] / B[i];
+      done[i] = 1;
+    }
+  }
+  let mean = [0, 0, 0];
+  let cnt = 0;
+  for (let i = 0; i < n; i++) if (K[i]) { for (let c = 0; c < 3; c++) mean[c] += img[i * 3 + c]; cnt++; }
+  mean = mean.map((v) => v / Math.max(1, cnt));
+  const small = Buffer.alloc(n * 4);
+  for (let i = 0; i < n; i++) {
+    for (let c = 0; c < 3; c++) small[i * 4 + c] = Math.max(0, Math.min(255, Math.round(done[i] ? fill[i * 3 + c] : mean[c])));
+    small[i * 4 + 3] = Math.round((1 - K[i]) * 255); // solo donde había personaje
+  }
+  // relleno escalado y suavizado, pegado sobre el original solo en la zona del personaje
+  const patch = await sharp(small, { raw: { width: sw, height: sh, channels: 4 } }).resize(W, H).blur(6).png().toBuffer();
+  await sharp(file).removeAlpha().composite([{ input: patch }]).png().toFile(outFile);
+}
+
+// Blur de caja separable repetido (≈ gaussiano), O(n) por pasada.
+function boxBlur(src, w, h, r, passes) {
+  let a = Float32Array.from(src);
+  let b = new Float32Array(a.length);
+  for (let p = 0; p < passes; p++) {
+    for (let y = 0; y < h; y++) {
+      let acc = 0;
+      const row = y * w;
+      for (let x = -r; x <= r; x++) acc += a[row + Math.min(w - 1, Math.max(0, x))];
+      for (let x = 0; x < w; x++) {
+        b[row + x] = acc / (2 * r + 1);
+        acc += a[row + Math.min(w - 1, x + r + 1)] - a[row + Math.max(0, x - r)];
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let acc = 0;
+      for (let y = -r; y <= r; y++) acc += b[Math.min(h - 1, Math.max(0, y)) * w + x];
+      for (let y = 0; y < h; y++) {
+        a[y * w + x] = acc / (2 * r + 1);
+        acc += b[Math.min(h - 1, y + r + 1) * w + x] - b[Math.max(0, y - r) * w + x];
+      }
+    }
+  }
+  return a;
 }
