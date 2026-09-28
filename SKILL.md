@@ -1,0 +1,75 @@
+---
+name: comic-motion
+description: Hace animaciones tipo cómic (motion comics) a partir de imágenes y videos del usuario, con HTML, CSS y Motion (ex Framer Motion). Incluye un panel local con línea de tiempo para revisar variantes, aprobarlas o rechazarlas con motivo y ajustar transiciones y timing, y exporta a video MP4/ProRes en 1080p o 4K. Usala cuando el usuario quiera animar viñetas, páginas de cómic, fotos o clips con estética de historieta (globos, onomatopeyas, líneas de velocidad, halftone, paneos de cámara), cuando mencione "motion comic", "animación tipo cómic", "Comic Studio" o un proyecto con scene.json de comic-motion, o cuando pida exportar o seguir iterando una animación de ese tipo.
+---
+
+# comic-motion
+
+Cada animación es un **proyecto**: una carpeta con `scene.json` (la única fuente de verdad), `assets/`, `effects/` (efectos custom) y `exports/`. Un player determinístico (`render(t)`, con curvas y springs de Motion evaluados como funciones puras) se usa igual en el panel y en el export cuadro por cuadro. Por eso lo que se aprueba en el panel es exactamente lo que sale en el video.
+
+CLI: `node ~/.claude/skills/comic-motion/bin/comic.js <comando>`. Abajo aparece abreviada como `comic`. Con `comic help` ves todos los comandos y con `comic presets` el catálogo completo de presets y params.
+
+Si falta `dist/` o `node_modules/`: `cd ~/.claude/skills/comic-motion && npm install && npm run build && npx playwright install chromium`.
+
+## Flujo
+
+### 1. Proyecto e ingesta
+- `comic init <dir> --title "…"` (16:9, 1920×1080, 24 fps por defecto; se cambia con `--width/--height/--fps`).
+- `comic ingest <dir> <archivos…>`: copia el material y mide cada archivo. Para los videos crea un proxy WebM y una **hoja de contacto** con los tiempos.
+
+**Terminado cuando:** cada archivo del usuario figura en `scene.assets`.
+
+### 2. Entender el material (vos sos el VLM)
+Mirá con Read **cada** imagen y **cada** hoja de contacto. Después, en `scene.json`, completá por asset:
+- `description`: qué se ve, quién aparece y, en los videos, los tiempos clave ("impacto a 3.8s").
+- `focus`: el punto de interés.
+
+Si una imagen es una **página de cómic** con varias viñetas:
+1. Corré `comic panels <dir> <asset>`.
+2. Mirá el overlay numerado. El detector falla cuando las viñetas se tocan sin canaleta o cuando el fondo se funde con la canaleta.
+3. Corregí a ojo y guardá los recortes definitivos en `asset.panels`.
+
+**Terminado cuando:** todos los assets tienen `description`, y las páginas de cómic tienen `panels` verificados visualmente.
+
+### 3. Storyboard
+Proponé al usuario, en pocas líneas, la secuencia de escenas: qué viñeta o clip va en cada una, qué pasa, la transición y la duración aproximada. Esperá su OK o sus cambios antes de escribir.
+
+### 4. Escribir la escena
+Editá `scene.json` siguiendo [references/scene-format.md](references/scene-format.md). Si hay archivos `references/*.local.md` con criterios propios, leelos y seguilos. Cada escena y cada clip arrancan con una variante `v1` en `draft`.
+- `comic check <dir>`: sin errores.
+- `comic snapshot <dir> --t a,b,c`: sacá cuadros en los momentos clave (entrada de cada escena, cada golpe, cada globo) y **miralos**. Corregí globos que tapen caras, textos cortados y cámaras que muestren bordes vacíos.
+- Mostrale al usuario los cuadros revisados.
+
+**Terminado cuando:** `check` pasa y viste un snapshot por escena sin problemas visibles.
+
+### 5. Panel de revisión
+- Levantalo en background: `comic studio <dir> --port 4777 --open`, y pasale la URL al usuario.
+- En el panel, el usuario:
+  - mira las variantes con **Ver** y las alterna con la tecla `A`;
+  - **aprueba** diciendo qué le gusta, o **rechaza** diciendo qué no funciona;
+  - arrastra clips y bordes para cambiar tiempos;
+  - cambia transiciones y params en el inspector;
+  - pide variantes o **retoques por prompt**.
+- Esos pedidos los resuelve solo la cola del server, con `claude -p` headless (modelo `meta.generatorModel`, hasta `meta.maxVariants` por pedido).
+- Cuando el usuario te pida seguir desde el chat, arrancá con `comic status <dir>`: resume lo aprobado, lo rechazado con sus motivos, las notas, lo desactualizado y los pedidos abiertos o fallidos.
+- Cambios grandes (rehacer la maqueta, sumar escenas, efectos custom nuevos) los hacés vos editando `scene.json`. El panel se recarga solo. Si el panel tenía un cambio sin guardar, su guardado choca (409) y recarga tu versión, sin pisarla.
+- Al crear variantes a mano, usá la memoria de revisión igual que el generador: conservá las `note` y evitá las `rejection`.
+
+### 6. Exportar
+El export sale del botón **Exportar video** del panel, o de:
+
+```
+comic render <dir> --quality 1080|4k [--codec prores] [--from s --to s]
+```
+
+- Lo que se exporta es lo **activo**. El panel avisa si hay escenas sin aprobar.
+- Referencia en una Mac Apple Silicon con GPU: 1080p ≈ 2,2 veces el tiempo real y 4K ≈ 7 veces.
+
+**Terminado cuando:** el archivo existe en `exports/`, extrajiste 2 o 3 cuadros con ffmpeg y los miraste, y le pasaste al usuario la ruta y los cuadros.
+
+## Efectos custom
+Cuando ningún preset alcanza, escribí `effects/<id>.js` en el proyecto con el contrato de la sección "Efectos custom" de `scene-format.md`. Aparece solo en el panel. Todo tiene que ser función del tiempo `t` (nada de `Math.random` ni animaciones CSS), porque si no el export no coincide con el preview.
+
+## Opcionales
+- **Profundidad 2.5D:** `comic cutout <dir> <asset>` (BiRefNet_lite, MIT, corre en JS) y después `depth` de 0.06 a 0.15 en la viñeta.
+- **Pixel art:** `pixelated: true` en la viñeta, para que al escalar no se vea borroso.

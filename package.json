@@ -1,0 +1,38 @@
+{
+  "name": "comic-motion",
+  "version": "1.0.0",
+  "description": "Motion comics con HTML/CSS/Motion: panel de revisión con variantes y export a video",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "keywords": [
+    "claude-code",
+    "skill",
+    "motion-comic",
+    "comic",
+    "animation",
+    "motion",
+    "video"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.0",
+    "@techstark/opencv-js": "^5.0.0-release.1",
+    "motion": "^13.4.4",
+    "playwright": "^1.63.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  },
+  "bin": {
+    "comic": "bin/comic.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
