@@ -356,6 +356,7 @@ const panel = {
     { key: 'focus', label: 'Foco [fx,fy] 0..1', type: 'json', default: null },
     { key: 'kenBurns', label: 'Ken Burns {from:{zoom,fx,fy}, to:{...}, ease}', type: 'json', default: null },
     { key: 'depth', label: 'Profundidad (usa el recorte del personaje)', type: 'number', min: 0, max: 0.3, step: 0.01, default: 0 },
+    { key: 'depthLock', label: 'Zonas fijas con profundidad [[x,y,w,h],…] (px del asset: textos, carteles)', type: 'json', default: null },
     { key: 'border', label: 'Borde (px)', type: 'number', min: 0, max: 40, default: 8 },
     { key: 'borderColor', label: 'Color de borde', type: 'color', default: '#111111' },
     { key: 'radius', label: 'Radio', type: 'number', min: 0, max: 80, default: 0 },
@@ -422,13 +423,23 @@ const panel = {
       // con profundidad y fondo rellenado, el fondo va sin personajes: no quedan fantasmas
       const base = makeMedia(p.depth && asset.bgfill && asset.type !== 'video' ? ctx.fileUrl(asset.bgfill) : ctx.assetUrl(asset));
       media.append(base);
-      layers.push({ img: base, depth: 0.5 });
+      // el fondo queda fijo a la página: lo que está pintado ahí (globos, carteles) no se desliza
+      layers.push({ img: base, depth: 0 });
       if (p.depth && asset.cutout) {
         const fg = el('img', null, { position: 'absolute', left: 0, top: 0, maxWidth: 'none', transformOrigin: '0 0' });
         fg.src = ctx.fileUrl(asset.cutout);
         ctx.preload(fg);
         media.append(fg);
-        layers.push({ img: fg, depth: 1.6 });
+        layers.push({ img: fg, depth: 1.1 });
+      }
+      // zonas bloqueadas: la imagen original, fija a la página y por encima de todo
+      if (p.depth && Array.isArray(p.depthLock) && p.depthLock.length) {
+        const lock = makeMedia(ctx.assetUrl(asset));
+        const rects = p.depthLock.map(([x, y, w, h]) => `<rect x='${x}' y='${y}' width='${w}' height='${h}' fill='white'/>`).join('');
+        const m = `url("data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' width='${asset.w}' height='${asset.h}' viewBox='0 0 ${asset.w} ${asset.h}' preserveAspectRatio='none'>${rects}</svg>`)}")`;
+        Object.assign(lock.style, { maskImage: m, webkitMaskImage: m, maskSize: '100% 100%', webkitMaskSize: '100% 100%', maskRepeat: 'no-repeat', webkitMaskRepeat: 'no-repeat' });
+        media.append(lock);
+        layers.push({ img: lock, depth: 0 });
       }
     }
     // filtros: los que devuelven css van al contenedor, los que agregan capas usan overlay
@@ -443,7 +454,7 @@ const panel = {
         cloneMedia: asset && asset.type !== 'video' ? () => {
           const c = makeMedia(ctx.assetUrl(asset));
           c.dataset.clone = '1';
-          layers.push({ img: c, depth: 0.5, clone: true });
+          layers.push({ img: c, depth: 0, clone: true });
           return c;
         } : null,
         uid: (s) => ctx.uid(s + i),
