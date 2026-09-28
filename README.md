@@ -4,6 +4,10 @@
 
 Le pasás imágenes y videos a Claude, arma una animación tipo cómic (viñetas, cámara, globos de diálogo, onomatopeyas, líneas de velocidad, halftone) y te abre un **panel de revisión con línea de tiempo**. Ahí aprobás o rechazás variantes, pedís cambios por prompt y ajustás transiciones y timing. Al final **exporta a video** (MP4 H.264 o ProRes, 1080p o 4K).
 
+![Uso del panel: variantes, aprobar/rechazar con motivo, ajustar timing y pedir variantes por prompt](docs/uso.gif)
+
+*El panel en uso: mirar variantes y alternarlas con `A`, rechazar con motivo, aprobar con nota, mover un clip en la línea de tiempo y pedir variantes nuevas por prompt. La espera de la generación está recortada.*
+
 ---
 
 ## Qué trae
@@ -158,7 +162,15 @@ export default {
 
 Aparece solo en el panel. La única regla: todo tiene que depender del tiempo `t`. Nada de `Math.random()`, `Date.now()` ni animaciones CSS, porque si no el export no coincide con el preview.
 
-## Rendimiento del export
+## Exportar
+
+Desde el botón **Exportar video** del panel (o `comic render`) elegís resolución (1080p o 4K), formato (MP4 H.264 o ProRes) y tramo (todo o el loop marcado). El render corre cuadro por cuadro con el mismo player que el preview, así que lo que aprobaste es exactamente lo que sale.
+
+![Export: diálogo, progreso y resultado](docs/export.gif)
+
+*Export a 1080p: diálogo, progreso (acelerado) y unos segundos del video resultante.*
+
+### Rendimiento
 
 Medido con GPU en Apple Silicon: 1080p ≈ 2 a 3 veces el tiempo real y 4K ≈ 7 veces. Los filtros SVG (tinta, colores planos) son lo más caro. Sin GPU pueden ser bastante más lentos.
 
@@ -175,3 +187,4 @@ Medido con GPU en Apple Silicon: 1080p ≈ 2 a 3 veces el tiempo real y 4K ≈ 7
 - Tipografías incluidas: [Bangers](fonts/OFL-Bangers.txt) y [Comic Neue](fonts/OFL-ComicNeue.txt), ambas SIL Open Font License 1.1.
 - Modelo de recorte: [BiRefNet_lite](https://huggingface.co/onnx-community/BiRefNet_lite-ONNX) (MIT). Se descarga en el primer uso, no viene incluido.
 - Dependencias principales: Motion, React, Playwright, sharp, OpenCV.js y transformers.js, cada una con su licencia.
+- Material del demo de los GIFs: fotos y video de la NASA (Apolo 8, Apolo 11 y Artemis I), de dominio público. Su uso no implica respaldo de la NASA a este proyecto.
