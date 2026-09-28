@@ -33,6 +33,7 @@ Le pasás imágenes y videos a Claude, arma una animación tipo cómic (viñetas
   - **Globos:** diálogo, pensamiento, grito y narración, con máquina de escribir.
   - **Onomatopeyas:** slam, pop, temblor y estiramiento.
   - **Efectos:** líneas de velocidad, líneas de foco, flash y viñeteado.
+  - **VFX en GPU** (three.js, WebGPU con respaldo a WebGL2): nieve, chispas, estallido de impacto, onda de choque, distorsión por calor, destello de impacto estilo anime y glow. Las partículas van en capas (detrás, entre el fondo y el personaje 2.5D, o delante) y son función pura del tiempo, así que el export coincide cuadro por cuadro.
   - **Filtros:** halftone, contorno de tinta, colores planos, papel, aberración de color y CSS libre.
 - **Efectos custom:** un archivo JS por efecto en el proyecto, con el mismo contrato que los incluidos.
 - **Ingesta asistida:**
@@ -102,6 +103,8 @@ Desde el panel revisás, pedís variantes y exportás. En cualquier momento pod�
 | `A` | Alternar entre la variante actual y la anterior |
 | `L` | Loop del tramo marcado (`Shift` + arrastrar en la regla) |
 | `Ctrl/⌘` + rueda | Zoom de la línea de tiempo |
+| `P` | Elegir en el preview el punto de anclaje del VFX seleccionado |
+| `+` / doble clic en un carril | Crear un clip en esa pista |
 
 ### CLI
 

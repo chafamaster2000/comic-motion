@@ -1,11 +1,12 @@
 import React, { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { activeVariant, findTarget, isStale, TRACK_LABELS } from '../shared/scene.js';
+import { activeVariant, findTarget, isStale } from '../shared/scene.js';
+import { trackLabel, panelsOf } from './tracks.js';
 import { Field, Num, EaseSelect } from './Fields.jsx';
 
 const STATUS_LABEL = { draft: 'borrador', approved: 'aprobada', rejected: 'rechazada', hidden: 'escondida', stale: 'aprobada · desactualizada' };
 
-export function Inspector({ studio, scene, presets, selection, setSelection, requests, activate, time, layout }) {
+export function Inspector({ studio, scene, presets, selection, setSelection, requests, activate, layout, pickAnchor, pickingKey, draft, askConfirm }) {
   const t = selection ? findTarget(scene, selection) : {};
   const byKind = useMemo(() => {
     const m = {};
@@ -61,7 +62,7 @@ export function Inspector({ studio, scene, presets, selection, setSelection, req
         <button className="btn tiny ghost" onClick={() => setSelection(isClip ? { scene: selection.scene } : null)}>
           ← {isClip ? 'escena' : 'todas'}
         </button>
-        <span className="kind">{isClip ? TRACK_LABELS[holder.track] : 'Escena'}</span>
+        <span className={'kind k-' + (isClip ? holder.track : 'scene')}>{isClip ? trackLabel(holder.track) : 'Escena'}</span>
         <input className="name" value={(isClip ? holder.label : holder.title) || ''} placeholder={holder.id} onChange={(e) => studio.edit((s) => {
           const h = findTarget(s, baseTarget).holder;
           if (isClip) h.label = e.target.value;
@@ -69,7 +70,7 @@ export function Inspector({ studio, scene, presets, selection, setSelection, req
         })} />
       </div>
 
-      <VariantPanel studio={studio} holder={holder} level={t.level} baseTarget={baseTarget} requests={requests} activate={activate} scene={scene} />
+      <VariantPanel studio={studio} holder={holder} level={t.level} baseTarget={baseTarget} requests={requests} activate={activate} scene={scene} draft={draft} askConfirm={askConfirm} />
 
       {v && (
         <div className="editor">
@@ -77,7 +78,7 @@ export function Inspector({ studio, scene, presets, selection, setSelection, req
             Ajustes de <em>{v.id}</em> <span className="dim">(se guardan en la variante activa)</span>
           </h4>
           {isClip ? (
-            <ClipEditor v={v} holder={holder} editActive={editActive} byKind={byKind} presets={presets} scene={scene} />
+            <ClipEditor v={v} holder={holder} editActive={editActive} byKind={byKind} presets={presets} scene={scene} sceneVariant={t.sceneVariant} pickAnchor={pickAnchor} pickingKey={pickingKey} />
           ) : (
             <SceneEditor v={v} editActive={editActive} byKind={byKind} setSelection={setSelection} selection={selection} />
           )}
@@ -134,7 +135,7 @@ function SceneEditor({ v, editActive, byKind, setSelection, selection }) {
               <span className={'dot ' + (cv ? (isStale(cv, 'clip') ? 'stale' : cv.status) : '')} />
               <b>{c.label || c.id}</b>
               <span className="dim">
-                {TRACK_LABELS[c.track]} · {cv?.preset} · {c.variants.length} var.
+                {trackLabel(c.track)} · {cv?.preset} · {c.variants.length} var.
               </span>
             </button>
           );
@@ -144,7 +145,7 @@ function SceneEditor({ v, editActive, byKind, setSelection, selection }) {
   );
 }
 
-function ClipEditor({ v, holder, editActive, byKind, presets, scene }) {
+function ClipEditor({ v, holder, editActive, byKind, presets, scene, sceneVariant, pickAnchor, pickingKey }) {
   const kind = holder.track;
   const options = [...(byKind[kind] || []), ...presets.custom];
   const def = presets.builtin.find((d) => d.id === v.preset);
@@ -176,7 +177,7 @@ function ClipEditor({ v, holder, editActive, byKind, presets, scene }) {
           key={p.key}
           def={p}
           value={v.params?.[p.key] ?? def.defaults?.[p.key]}
-          ctx={{ assets: scene.assets, filters: byKind.filter }}
+          ctx={{ assets: scene.assets, filters: byKind.filter, panels: panelsOf(sceneVariant), pickAnchor, pickingKey }}
           onChange={(val) => editActive((x) => (x.params = { ...(x.params || {}), [p.key]: val }))}
         />
       ))}
@@ -186,7 +187,7 @@ function ClipEditor({ v, holder, editActive, byKind, presets, scene }) {
 }
 
 // ---------- variantes ----------
-function VariantPanel({ studio, holder, level, baseTarget, requests, activate, scene }) {
+function VariantPanel({ studio, holder, level, baseTarget, requests, activate, scene, draft, askConfirm }) {
   const [showHidden, setShowHidden] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [count, setCount] = useState(scene.meta.maxVariants || 3);
@@ -233,7 +234,7 @@ function VariantPanel({ studio, holder, level, baseTarget, requests, activate, s
       <div className="cards">
         <AnimatePresence initial={false}>
           {visible.map((v) => (
-            <VariantCard key={v.id} v={v} level={level} active={v.id === active} target={{ ...baseTarget, variant: v.id }} studio={studio} activate={activate} maxVariants={scene.meta.maxVariants || 3} />
+            <VariantCard key={v.id} v={v} level={level} active={v.id === active} target={{ ...baseTarget, variant: v.id }} studio={studio} activate={activate} maxVariants={scene.meta.maxVariants || 3} draft={draft} askConfirm={askConfirm} />
           ))}
         </AnimatePresence>
       </div>
@@ -246,13 +247,24 @@ function VariantPanel({ studio, holder, level, baseTarget, requests, activate, s
   );
 }
 
-function VariantCard({ v, level, active, target, studio, activate, maxVariants }) {
+function VariantCard({ v, level, active, target, studio, activate, maxVariants, draft, askConfirm }) {
   const [mode, setMode] = useState(null); // approve | reject | retouch
   const [text, setText] = useState('');
   const [n, setN] = useState(1);
   const st = isStale(v, level) ? 'stale' : v.status;
-  const submit = () => {
-    if (mode === 'approve') studio.review(target, 'approve', text.trim() || undefined);
+  const submit = async () => {
+    if (mode === 'approve') {
+      if (draft && askConfirm) {
+        const ok = await askConfirm({
+          title: 'Modo borrador activo',
+          message: 'Estás en modo borrador: lo que ves no es la calidad final. ¿Aprobar igual?',
+          okLabel: 'Aprobar igual',
+          cancelLabel: 'Volver',
+        });
+        if (!ok) return;
+      }
+      studio.review(target, 'approve', text.trim() || undefined);
+    }
     if (mode === 'reject') {
       if (!text.trim()) return studio.notify('Contá qué no funciona: es lo que evita que la próxima variante repita el error.', 'warn');
       studio.review(target, 'reject', text.trim());

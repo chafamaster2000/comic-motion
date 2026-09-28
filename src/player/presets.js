@@ -4,6 +4,8 @@
 //   filtro:     { id, kind: 'filter', label, params, build(ctx) -> { css?, update?(t) } }
 // Todo es función del tiempo local t (segundos): nada de relojes ni Math.random sueltos.
 import { easing, progress, keyframes, mix, clamp } from './ease.js';
+import { mediaLayout, panelView, layerLayout } from './media.js';
+import { VFX } from './vfx/index.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const el = (tag, cls, style) => {
@@ -86,19 +88,11 @@ const ENTER_PARAM = { key: 'enter', label: 'Entrada', type: 'motion', options: E
 const EXIT_PARAM = { key: 'exit', label: 'Salida', type: 'motion', options: ENTERS };
 
 // ---------- geometría de medios (cover + foco + zoom) ----------
-function placeMedia(img, asset, crop, boxW, boxH, zoom, fx, fy) {
-  const [cx, cy, cw, ch] = crop || [0, 0, asset.w, asset.h];
-  const k = Math.max(boxW / cw, boxH / ch) * zoom;
-  const W = asset.w * k;
-  const H = asset.h * k;
-  let left = boxW / 2 - (cx + fx * cw) * k;
-  let top = boxH / 2 - (cy + fy * ch) * k;
-  // no dejar ver fuera del recorte
-  left = clamp(boxW - (cx + cw) * k, -cx * k, left);
-  top = clamp(boxH - (cy + ch) * k, -cy * k, top);
-  img.style.width = W + 'px';
-  img.style.height = H + 'px';
-  img.style.transform = `translate(${left}px, ${top}px)`;
+// La matemática vive en media.js y la comparte la viñeta GPU.
+function applyLayout(img, L) {
+  img.style.width = L.W + 'px';
+  img.style.height = L.H + 'px';
+  img.style.transform = `translate(${L.left}px, ${L.top}px)`;
 }
 
 // ---------- CÁMARA ----------
@@ -369,6 +363,7 @@ const panel = {
     { key: 'videoIn', label: 'Video: segundo de entrada', type: 'number', min: 0, step: 0.04, default: 0 },
     { key: 'rate', label: 'Video: velocidad', type: 'number', min: 0.1, max: 4, step: 0.05, default: 1 },
     { key: 'loop', label: 'Video: loop', type: 'bool', default: false },
+    { key: 'gpu', label: 'Dibujar con GPU (three) aunque no tenga VFX', type: 'bool', default: false },
   ],
   build(ctx) {
     const p = ctx.params;
@@ -424,13 +419,13 @@ const panel = {
       const base = makeMedia(p.depth && asset.bgfill && asset.type !== 'video' ? ctx.fileUrl(asset.bgfill) : ctx.assetUrl(asset));
       media.append(base);
       // el fondo queda fijo a la página: lo que está pintado ahí (globos, carteles) no se desliza
-      layers.push({ img: base, depth: 0 });
+      layers.push({ img: base, depth: 0, kind: 'base', src: base.src });
       if (p.depth && asset.cutout) {
         const fg = el('img', null, { position: 'absolute', left: 0, top: 0, maxWidth: 'none', transformOrigin: '0 0' });
         fg.src = ctx.fileUrl(asset.cutout);
         ctx.preload(fg);
         media.append(fg);
-        layers.push({ img: fg, depth: 1.1 });
+        layers.push({ img: fg, depth: 1.1, kind: 'fg', src: fg.src });
       }
       // zonas bloqueadas: la imagen original, fija a la página y por encima de todo
       if (p.depth && Array.isArray(p.depthLock) && p.depthLock.length) {
@@ -439,18 +434,22 @@ const panel = {
         const m = `url("data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' width='${asset.w}' height='${asset.h}' viewBox='0 0 ${asset.w} ${asset.h}' preserveAspectRatio='none'>${rects}</svg>`)}")`;
         Object.assign(lock.style, { maskImage: m, webkitMaskImage: m, maskSize: '100% 100%', webkitMaskSize: '100% 100%', maskRepeat: 'no-repeat', webkitMaskRepeat: 'no-repeat' });
         media.append(lock);
-        layers.push({ img: lock, depth: 0 });
+        layers.push({ img: lock, depth: 0, kind: 'lock', src: lock.src, rects: p.depthLock });
       }
     }
     // filtros: los que devuelven css van al contenedor, los que agregan capas usan overlay
     const filterCss = [];
+    const overlays = [];
     for (const [i, spec] of (p.filters || []).entries()) {
       const def = ctx.presets[spec.preset];
       if (!def || def.kind !== 'filter') continue;
       const res = def.build({
         ...ctx,
         params: { ...defaultsOf(def), ...spec },
-        overlay: (node) => box.append(node),
+        overlay: (node) => {
+          overlays.push(node);
+          box.append(node);
+        },
         cloneMedia: asset && asset.type !== 'video' ? () => {
           const c = makeMedia(ctx.assetUrl(asset));
           c.dataset.clone = '1';
@@ -463,21 +462,26 @@ const panel = {
     }
     if (filterCss.length) media.style.filter = filterCss.join(' ');
     ctx.mount(box, 'page');
-    const focus = p.focus || asset?.focus || [0.5, 0.5];
-    const kb = p.kenBurns;
+    // lo que necesita la viñeta GPU (src/player/gpu): mismas capas y mismos números
+    const gpu = {
+      asset,
+      box,
+      media,
+      overlays,
+      inner: [innerW, innerH],
+      origin: [x + (p.border ?? 8), y + (p.border ?? 8)],
+      layers: layers.filter((l) => !l.clone),
+      filters: p.filters || [],
+      crop: p.crop || null,
+      pixelated: !!p.pixelated,
+      view: null,
+    };
     return {
+      gpu,
       update(t) {
-        let zoom = 1;
-        let fx = focus[0];
-        let fy = focus[1];
-        if (kb) {
-          const e = easing(kb.ease || 'easeInOut', ctx.duration)(progress(t, 0, ctx.duration));
-          zoom = mix(kb.from?.zoom ?? 1, kb.to?.zoom ?? 1.12, e);
-          fx = mix(kb.from?.fx ?? fx, kb.to?.fx ?? fx, e);
-          fy = mix(kb.from?.fy ?? fy, kb.to?.fy ?? fy, e);
-        }
-        const dp = (p.depth || 0) * easing('easeInOut', ctx.duration)(progress(t, 0, ctx.duration));
-        if (asset) for (const l of layers) placeMedia(l.img, asset, p.crop, innerW, innerH, zoom * (1 + dp * l.depth), fx, fy - (l.depth > 1 ? dp * 0.15 : 0));
+        const view = panelView(p, asset, ctx.duration, t);
+        gpu.view = view;
+        if (asset) for (const l of layers) applyLayout(l.img, (l.layout = layerLayout(asset, p.crop, innerW, innerH, view, l.depth)));
         const io = inOut(t, ctx.duration, p.enter, p.exit);
         box.style.opacity = io.opacity;
         box.style.transform = `rotate(${p.tilt || 0}deg)` + io.transform;
@@ -975,7 +979,7 @@ export function defaultsOf(def) {
   return o;
 }
 
-export const BUILTIN = [camera, shake, dutch, dolly, panel, bubble, ono, speedLines, focusLines, flash, vignette, halftone, ink, posterize, paper, chroma, cssFilter, ...transitions];
+export const BUILTIN = [camera, shake, dutch, dolly, panel, bubble, ono, speedLines, focusLines, flash, vignette, halftone, ink, posterize, paper, chroma, cssFilter, ...transitions, ...VFX];
 
 {
   const seen = new Set();

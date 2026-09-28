@@ -5,6 +5,8 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { BUILTIN, defaultsOf } from './player/presets.js';
 import { TRACKS, activeVariant, nextVariantId, findTarget, layoutScenes } from './shared/scene.js';
+import { vfxNeeds } from './player/vfx/index.js';
+import { unsupportedGpuFilters } from './player/gpu/filter-support.js';
 
 export const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -49,7 +51,8 @@ export function openProject(dir) {
       return fs
         .readdirSync(d)
         .filter((f) => f.endsWith('.js'))
-        .map((f) => ({ id: f.replace(/\.js$/, ''), file: 'effects/' + f, url: '/p/effects/' + f }));
+        // effects/<id>.js (clip/filtro/transición) o effects/<id>.vfx.js (VFX GPU, kind 'vfx')
+        .map((f) => ({ id: f.replace(/(\.vfx)?\.js$/, ''), vfx: f.endsWith('.vfx.js'), file: 'effects/' + f, url: '/p/effects/' + f }));
     },
   };
 }
@@ -65,7 +68,7 @@ export function newScene({ title = 'Sin título', width = 1920, height = 1080, f
 // Catálogo de presets serializable (para el panel y el generador headless).
 export function catalog(project) {
   const builtin = BUILTIN.map((d) => ({ id: d.id, kind: d.kind, label: d.label, params: d.params || [], defaults: defaultsOf(d) }));
-  const custom = project ? project.customEffects().map((c) => ({ id: c.id, kind: 'custom', label: c.id, custom: true, url: c.url })) : [];
+  const custom = project ? project.customEffects().map((c) => ({ id: c.id, kind: c.vfx ? 'vfx' : 'custom', label: c.id, custom: true, url: c.url })) : [];
   return { builtin, custom };
 }
 
@@ -75,7 +78,10 @@ export function validate(scene, project) {
   const warnings = [];
   const ids = new Set(BUILTIN.map((d) => d.id));
   const kinds = Object.fromEntries(BUILTIN.map((d) => [d.id, d.kind]));
-  const custom = new Set(project ? project.customEffects().map((c) => c.id) : []);
+  const customList = project ? project.customEffects() : [];
+  const custom = new Set(customList.map((c) => c.id));
+  const customVfx = new Set(customList.filter((c) => c.vfx).map((c) => c.id));
+  const defs = Object.fromEntries(BUILTIN.map((d) => [d.id, d]));
   const m = scene.meta || {};
   if (!m.width || !m.height || !m.fps) errors.push('meta.width/height/fps faltan');
   const assetIds = new Set(Object.keys(scene.assets || {}));
@@ -103,6 +109,32 @@ export function validate(scene, project) {
       if (v.transition && !ids.has(v.transition.preset) && !custom.has(v.transition.preset)) errors.push(`${w2}: transición desconocida ${v.transition.preset}`);
       if (v.transition && ids.has(v.transition.preset) && kinds[v.transition.preset] !== 'transition') errors.push(`${w2}: ${v.transition.preset} no es una transición`);
       const clipIds = new Set();
+      const panelOf = {};
+      for (const c of v.clips || []) if (c.track === 'panel') panelOf[c.id] = activeVariant(c);
+      const firstPanel = Object.keys(panelOf)[0] || null;
+      const gpuMode = {};
+      for (const c of v.clips || []) {
+        const av = activeVariant(c);
+        if (!av || av.status === 'hidden') continue;
+        if (c.track === 'panel' && av.params?.gpu) gpuMode[c.id] = 'full';
+        if (c.track !== 'vfx') continue;
+        const tgt = av.params?.target || firstPanel;
+        const w3 = `${w2}/${c.id}/${av.id}`;
+        if (!tgt) errors.push(`${w3}: VFX sin viñeta en la escena`);
+        else if (!panelOf[tgt]) errors.push(`${w3}: target "${tgt}" no es una viñeta de la escena`);
+        else {
+          const m = customVfx.has(av.preset) ? 'full' : vfxNeeds(defs[av.preset], av.params);
+          if (m) gpuMode[tgt] = gpuMode[tgt] === 'full' || m === 'full' ? 'full' : 'overlay';
+        }
+        const an = av.params?.anchor;
+        if (an != null && !(Array.isArray(an) && an.length === 2 && an.every((x) => typeof x === 'number'))) errors.push(`${w3}: anchor tiene que ser [x, y] en px de página`);
+        if (av.params?.layer && !['back', 'mid', 'front'].includes(av.params.layer)) errors.push(`${w3}: layer inválido ${av.params.layer} (back|mid|front)`);
+      }
+      for (const [pid, mode] of Object.entries(gpuMode)) {
+        if (mode !== 'full') continue;
+        const pv = panelOf[pid];
+        for (const f of unsupportedGpuFilters(pv.params?.filters)) warnings.push(`${w2}/${pid}: filtro ${f} no soportado en viñeta GPU (se ignora)`);
+      }
       for (const c of v.clips || []) {
         const w3 = `${w2}/${c.id}`;
         if (clipIds.has(c.id)) errors.push(`${w3}: id de clip repetido`);
@@ -121,6 +153,8 @@ export function validate(scene, project) {
             const k = kinds[cv.preset];
             const want = c.track === 'camera' ? 'camera' : c.track;
             if (k !== want) errors.push(`${w4}: preset ${cv.preset} es ${k} pero el track es ${c.track}`);
+          } else if (c.track === 'vfx' && !customVfx.has(cv.preset)) {
+            errors.push(`${w4}: el efecto custom ${cv.preset} no es VFX (tiene que llamarse effects/${cv.preset}.vfx.js)`);
           }
           if (typeof cv.start !== 'number' || cv.start < 0) errors.push(`${w4}: start inválido`);
           if (!(cv.duration > 0)) errors.push(`${w4}: duration inválida`);

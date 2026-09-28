@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { TRACKS, TRACK_LABELS, activeVariant, activeClips, isStale } from '../shared/scene.js';
+import { activeVariant, activeClips, isStale } from '../shared/scene.js';
+import { trackList, trackLabel, makeClip } from './tracks.js';
 
 const GUTTER = 118;
 const LANE = 26;
@@ -10,7 +11,7 @@ function statusClass(v, level) {
   return v.status;
 }
 
-export function Timeline({ scene, layout, time, fps, duration, seek, edit, selection, setSelection, loop, setLoop }) {
+export function Timeline({ scene, presets, layout, time, fps, duration, seek, edit, selection, setSelection, loop, setLoop }) {
   const scrollRef = useRef(null);
   const [pps, setPps] = useState(null); // píxeles por segundo
   const drag = useRef(null);
@@ -26,7 +27,7 @@ export function Timeline({ scene, layout, time, fps, duration, seek, edit, selec
   // carriles por pista (sin solapamientos visuales)
   const rows = useMemo(() => {
     const out = [];
-    for (const track of TRACKS) {
+    for (const track of trackList(scene, presets)) {
       const items = [];
       for (const e of layout) {
         for (const { clip, variant } of activeClips(e.variant)) {
@@ -48,7 +49,24 @@ export function Timeline({ scene, layout, time, fps, duration, seek, edit, selec
       out.push({ track, items, lanes: Math.max(1, lanes.length) });
     }
     return out;
-  }, [layout]);
+  }, [layout, scene, presets]);
+
+  const canAdd = (track) => (presets?.builtin || []).some((d) => d.kind === track);
+  // crea un clip con el primer preset de la pista, en la escena que está bajo el tiempo t
+  const addClip = (track, tGlobal) => {
+    const e = layout.find((x) => tGlobal >= x.start && tGlobal < x.end) || layout[layout.length - 1];
+    if (!e || !canAdd(track)) return;
+    const local = snap(Math.max(0, Math.min(e.duration - 1 / fps, tGlobal - e.start)));
+    let created = null;
+    edit((s) => {
+      const sv = activeVariant(s.scenes.find((x) => x.id === e.scene.id));
+      const c = makeClip(sv, track, presets, local, fps, s.meta);
+      if (!c) return;
+      sv.clips = [...(sv.clips || []), c];
+      created = c;
+    });
+    if (created) setSelection({ scene: e.scene.id, clip: created.id, sceneVariant: e.variant.id });
+  };
 
   const xToT = (clientX) => {
     const r = scrollRef.current.getBoundingClientRect();
@@ -177,8 +195,26 @@ export function Timeline({ scene, layout, time, fps, duration, seek, edit, selec
 
         {/* pistas */}
         {rows.map(({ track, items, lanes }) => (
-          <div key={track} className={'tl-row track t-' + track} style={{ height: lanes * LANE + 6 }} onPointerDown={(e) => seek(snap(xToT(e.clientX)))}>
-            <div className="tl-label">{TRACK_LABELS[track]}</div>
+          <div
+            key={track}
+            className={'tl-row track t-' + track}
+            style={{ height: lanes * LANE + 6 }}
+            onPointerDown={(e) => seek(snap(xToT(e.clientX)))}
+            onDoubleClick={(e) => e.target === e.currentTarget && addClip(track, snap(xToT(e.clientX)))}
+          >
+            <div className="tl-label">
+              <span className={'tl-name n-' + track}>{trackLabel(track)}</span>
+              {canAdd(track) && (
+                <button
+                  className="tl-add"
+                  title={`Agregar clip de ${trackLabel(track)} en el cursor (o doble clic en la pista)`}
+                  onPointerDown={(ev) => ev.stopPropagation()}
+                  onClick={() => addClip(track, time)}
+                >
+                  +
+                </button>
+              )}
+            </div>
             {items.map(({ e, clip, variant, lane }) => {
               const nVar = clip.variants.filter((x) => x.status !== 'hidden').length;
               return (

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { EASES } from '../player/ease.js';
+import { isClipRef } from './tracks.js';
 
 export function Num({ value, onChange, min, max, step = 0.01, suffix }) {
   const [txt, setTxt] = useState(value ?? '');
@@ -106,9 +107,54 @@ function FiltersField({ value, onChange, filters }) {
   );
 }
 
+// [x, y] en coordenadas de página de la escena; se puede elegir con clic en el preview.
+function AnchorField({ def, value, onChange, ctx }) {
+  const v = Array.isArray(value) ? value : null;
+  const picking = ctx.pickingKey === def.key;
+  const set = (i, n) => {
+    const next = v ? [...v] : [0, 0];
+    next[i] = Math.round(n);
+    onChange(next);
+  };
+  return (
+    <span className="anchor-field">
+      <span className="xy">
+        <b>x</b>
+        <Num value={v?.[0]} step={1} onChange={(n) => set(0, n)} />
+        <b>y</b>
+        <Num value={v?.[1]} step={1} onChange={(n) => set(1, n)} />
+      </span>
+      {ctx.pickAnchor && (
+        <button type="button" className={'btn tiny pick ' + (picking ? 'on' : '')} onClick={(e) => { e.preventDefault(); ctx.pickAnchor(picking ? null : def.key); }} title="Clic en el preview para ubicarlo (tecla P). Esc cancela.">
+          {picking ? '◎ apuntando… (Esc)' : '◎ Elegir en el preview'}
+        </button>
+      )}
+    </span>
+  );
+}
+
 export function Field({ def, value, onChange, ctx = {} }) {
   let input;
-  switch (def.type) {
+  const Wrap = def.type === 'anchor' ? 'div' : 'label';
+  const type = def.type === 'anchor' ? 'anchor' : ctx.panels && isClipRef(def) ? 'clipRef' : def.type;
+  switch (type) {
+    case 'anchor':
+      input = <AnchorField def={def} value={value} onChange={onChange} ctx={ctx} />;
+      break;
+    case 'clipRef':
+      input = (
+        <select value={value ?? ''} onChange={(e) => onChange(e.target.value || null)}>
+          <option value="">(ninguna · toda la página)</option>
+          {(ctx.panels || []).map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+              {p.label !== p.id ? ` (${p.id})` : ''}
+            </option>
+          ))}
+          {value && !(ctx.panels || []).some((p) => p.id === value) && <option value={value}>{value} (no existe)</option>}
+        </select>
+      );
+      break;
     case 'number':
       input = <Num value={value} min={def.min} max={def.max} step={def.step || (def.max != null && def.max <= 1 ? 0.01 : 1)} onChange={onChange} />;
       break;
@@ -163,9 +209,9 @@ export function Field({ def, value, onChange, ctx = {} }) {
       input = <JsonField value={value} onChange={onChange} />;
   }
   return (
-    <label className={'field f-' + def.type}>
+    <Wrap className={'field f-' + type}>
       <span className="field-label">{def.label || def.key}</span>
       {input}
-    </label>
+    </Wrap>
   );
 }

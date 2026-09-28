@@ -4,6 +4,8 @@ import { layoutScenes, activeClips, hashString, mulberry32 } from '../shared/sce
 import { BUILTIN, defaultsOf } from './presets.js';
 import { easing } from './ease.js';
 import { mix } from 'motion';
+import { createGpuSystem } from './gpu/engine.js';
+import { vfxNeeds } from './vfx/index.js';
 
 const STYLE_ID = 'cm-player-style';
 
@@ -61,6 +63,8 @@ export function createPlayer(root, opts) {
   let loop = null; // [a,b]
   const listeners = new Set();
   const pending = new Set(); // imágenes por decodificar
+  let gpu = null; // sistema GPU (three) si alguna viñeta lo necesita
+  let draft = false;
 
   const W = () => scene.meta.width;
   const H = () => scene.meta.height;
@@ -71,7 +75,30 @@ export function createPlayer(root, opts) {
     return (opts.baseUrl || '') + f;
   }
 
+  // px de dispositivo por px del cuadro. En el export lo fija render-entry (zoom CSS explícito);
+  // en el panel se mide (el host escala el cuadro con transform).
+  function pixelScale() {
+    let s = typeof opts.pixelScale === 'function' ? opts.pixelScale() : opts.pixelScale;
+    if (!s) {
+      const fr = built?.frame;
+      const w = fr ? fr.getBoundingClientRect().width : 0;
+      s = (w > 0 ? w / W() : 1) * (window.devicePixelRatio || 1);
+    }
+    return draft ? Math.max(0.25, s * 0.5) : s;
+  }
+
+  function ensureGpu(frame) {
+    // layoutZoom: escala del espacio de layout de Chrome (zoom CSS × devicePixelRatio), donde se redondean las cajas
+    const layoutZoom = () => opts.layoutZoom || window.devicePixelRatio || 1;
+    if (!gpu) gpu = createGpuSystem({ frame, W: W(), H: H(), pixelScale, layoutZoom, draft: () => draft, forceWebGL: !!opts.forceWebGL });
+    return gpu;
+  }
+
   function build() {
+    if (gpu) {
+      gpu.dispose();
+      gpu = null;
+    }
     root.innerHTML = '';
     const frame = document.createElement('div');
     frame.className = 'cm-frame';
@@ -111,10 +138,28 @@ export function createPlayer(root, opts) {
       const clips = activeClips(v);
       // rects de viñetas para que cámara y globos puedan apuntarles
       const panelRects = {};
+      const firstPanel = clips.find((c) => c.clip.track === 'panel')?.clip.id || null;
       for (const { clip, variant } of clips) {
         if (clip.track === 'panel') panelRects[clip.id] = variant.params?.rect || [0, 0, stage.w, stage.h];
       }
-      const order = ['panel', 'fx', 'bubble', 'ono', 'camera'];
+      // viñetas que dibuja la GPU: 'full' (three dibuja todo el contenido) u 'overlay' (canvas encima)
+      const gpuNeeds = {};
+      const upgrade = (id, m) => {
+        if (!id || !m) return;
+        gpuNeeds[id] = gpuNeeds[id] === 'full' || m === 'full' ? 'full' : 'overlay';
+      };
+      for (const { clip, variant } of clips) {
+        if (clip.track === 'panel' && variant.params?.gpu) upgrade(clip.id, 'full');
+        if (clip.track === 'vfx') {
+          const def = presets[variant.preset];
+          const tgt = variant.params?.target || firstPanel;
+          if (tgt && !panelRects[tgt]) errors.push(`${entry.scene.id}/${clip.id}: la viñeta destino "${tgt}" no existe`);
+          else upgrade(tgt, vfxNeeds(def, variant.params));
+        }
+      }
+      const sref = { key: entry.scene.id, visible: false };
+      const gpuPanels = {};
+      const order = ['panel', 'vfx', 'fx', 'bubble', 'ono', 'camera'];
       const sorted = [...clips].sort((a, b) => order.indexOf(a.clip.track) - order.indexOf(b.clip.track));
       const runtimes = [];
       for (const { clip, variant } of sorted) {
@@ -135,6 +180,7 @@ export function createPlayer(root, opts) {
           variant,
           stage,
           frame: { w: W(), h: H() },
+          fps: scene.meta.fps || 24,
           presets,
           seed,
           rand: mulberry32(seed),
@@ -158,19 +204,36 @@ export function createPlayer(root, opts) {
             holder.append(node);
           },
         };
+        const rec = { clip, variant, def, holder, isCamera: def.kind === 'camera', isVfx: def.kind === 'vfx' };
         let rt;
         try {
+          if (rec.isVfx) {
+            const tgt = variant.params?.target || firstPanel;
+            const gp = gpuPanels[tgt];
+            if (!gp) throw new Error(`VFX sin viñeta destino (${tgt || 'la escena no tiene viñetas'})`);
+            ctx.params.target = tgt;
+            ctx.gpu = gp.vfxApi(ctx, rec);
+          }
           rt = def.build(ctx) || {};
         } catch (e) {
           errors.push(`${entry.scene.id}/${clip.id}: ${e.message}`);
           continue;
         }
+        rec.rt = rt;
         if (holder.childNodes.length) (space === 'screen' ? screen : page).append(holder);
-        runtimes.push({ clip, variant, def, rt, holder, isCamera: def.kind === 'camera' });
+        runtimes.push(rec);
+        if (def.kind === 'panel' && gpuNeeds[clip.id] && rt.gpu) {
+          const gp = ensureGpu(frame).createPanel(rec, clip.id, gpuNeeds[clip.id], sref);
+          gp.ready.then(() => {
+            if (!playing && built && built.gpu === gpu) render(time);
+          });
+          gpuPanels[clip.id] = gp;
+          rec.gpuPanel = gp;
+        }
       }
-      return { entry, stage, sceneEl, cam, page, screen, overlay, under, runtimes, zi };
+      return { entry, stage, sceneEl, cam, page, screen, overlay, under, runtimes, zi, sref };
     });
-    built = { frame, layout, scenes, videos, errors };
+    built = { frame, layout, scenes, videos, errors, gpu };
     if (errors.length) console.warn('[comic]', errors);
   }
 
@@ -199,6 +262,7 @@ export function createPlayer(root, opts) {
       const isLast = i === scenes.length - 1;
       const visible = t >= start && (t < end || (isLast && t <= end + 1e-6));
       s.visible = visible;
+      s.sref.visible = visible;
       s.sceneEl.style.display = visible ? '' : 'none';
       if (!visible) return;
       resetScene(s);
@@ -224,7 +288,19 @@ export function createPlayer(root, opts) {
           dzoom *= res.dzoom || 1;
           continue;
         }
+        if (r.isVfx) {
+          // VFX: t local cuantizado si stepFps > 0 (onTwos = 12)
+          const sf = +r.variant.params?.stepFps || 0;
+          const lt = local - cs;
+          const tq = sf > 0 ? Math.floor(lt * sf + 1e-6) / sf : lt;
+          r.gpuTime.value = tq;
+          r.gpuEnabled.value = on ? 1 : 0;
+          for (const g of r.gpuOwn || []) g.visible = on;
+          if (on && r.rt.update) r.rt.update(tq);
+          continue;
+        }
         r.holder.classList.toggle('cm-clip-hidden', !on);
+        r.on = on;
         if (on && r.rt.update) r.rt.update(local - cs);
       }
       const sc = (W() / view.w) * dzoom;
@@ -250,8 +326,14 @@ export function createPlayer(root, opts) {
         ctx: { frame: { w: W(), h: H() }, hashRand: (n) => mulberry32(hashString(s.entry.scene.id) ^ Math.imul(n + 1, 2654435761))() },
       });
     });
+    renderGpu();
     syncVideos(t, false);
     for (const cb of listeners) cb(t, total);
+  }
+
+  function renderGpu() {
+    if (!gpu) return;
+    gpu.renderVisible((gp) => gp.sceneRef.visible && gp.rt.on);
   }
 
   function videoTime(v, t) {
@@ -315,6 +397,13 @@ export function createPlayer(root, opts) {
       );
     }
     await Promise.all(waits);
+    if (gpu) {
+      // la GPU dibuja con las texturas y videos ya listos y el export espera a que termine
+      await gpu.whenReady();
+      if (built.videos.length) await new Promise((r) => requestAnimationFrame(r));
+      renderGpu();
+      await gpu.finish();
+    }
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
   }
 
@@ -373,6 +462,23 @@ export function createPlayer(root, opts) {
     get frameEl() {
       return built?.frame;
     },
+    // backend efectivo de las viñetas GPU: 'webgpu' | 'webgl2' | null (sin viñetas GPU o sin GPU)
+    get gpuBackend() {
+      return gpu?.backend || null;
+    },
+    get gpuPanelCount() {
+      return gpu ? gpu.panels.size : 0;
+    },
+    // espera a que las viñetas GPU estén inicializadas (devuelve el backend)
+    async gpuReady() {
+      if (gpu) await gpu.whenReady();
+      return gpu?.backend || null;
+    },
+    // modo borrador del preview: canvas GPU a media resolución y menos partículas. Nunca en el export.
+    setDraft(on) {
+      draft = !!on;
+      render(time);
+    },
     duration,
     render,
     seek,
@@ -396,6 +502,8 @@ export function createPlayer(root, opts) {
     },
     destroy() {
       pause();
+      if (gpu) gpu.dispose();
+      gpu = null;
       root.innerHTML = '';
       listeners.clear();
     },

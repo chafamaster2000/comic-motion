@@ -150,3 +150,23 @@ export function QueueDrawer({ requests, onClose, cancel, setSelection }) {
     </Backdrop>
   );
 }
+
+// Confirmación propia del panel (en vez de window.confirm). Enter confirma, Esc cancela (lo maneja App).
+export function ConfirmDialog({ title, message, okLabel = 'Aceptar', cancelLabel = 'Cancelar', onAnswer }) {
+  return (
+    <Backdrop onClose={() => onAnswer(false)}>
+      <motion.div className="dialog confirm" role="alertdialog" aria-modal="true" initial={{ y: 30, scale: 0.97 }} animate={{ y: 0, scale: 1 }} exit={{ y: 30, scale: 0.97 }}>
+        <h3>{title}</h3>
+        <p className="confirm-msg">{message}</p>
+        <div className="dialog-actions">
+          <button className="btn ghost" onClick={() => onAnswer(false)}>
+            {cancelLabel}
+          </button>
+          <button className="btn primary" autoFocus onClick={() => onAnswer(true)}>
+            {okLabel}
+          </button>
+        </div>
+      </motion.div>
+    </Backdrop>
+  );
+}

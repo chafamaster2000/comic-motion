@@ -23,11 +23,15 @@ async function openPage(serverUrl, meta, scale) {
   const logs = [];
   page.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`));
   page.on('pageerror', (e) => logs.push(`[pageerror] ${e.message}`));
-  await page.goto(serverUrl + '/render.html?scale=' + scale, { waitUntil: 'load' });
+  // COMIC_FORCE_WEBGL=1 fuerza el backend WebGL2 de three (para probar la caída sin WebGPU)
+  await page.goto(serverUrl + '/render.html?scale=' + scale + (process.env.COMIC_FORCE_WEBGL === '1' ? '&webgl=1' : ''), { waitUntil: 'load' });
   await page.waitForFunction(() => window.__comicReady || window.__comicError, null, { timeout: 60000 });
   const err = await page.evaluate(() => window.__comicError);
   if (err) throw new Error('el player falló: ' + err + '\n' + logs.join('\n'));
-  const info = await page.evaluate(() => ({ duration: window.__comic.duration, fps: window.__comic.fps, errors: window.__comic.errors }));
+  const info = await page.evaluate(() => ({ duration: window.__comic.duration, fps: window.__comic.fps, errors: window.__comic.errors, gpuBackend: window.__comic.gpuBackend, gpuPanels: window.__comic.gpuPanels }));
+  info.gpuWarnings = [];
+  if (info.gpuPanels > 0 && info.gpuBackend === 'webgl2') info.gpuWarnings.push('VFX con WebGL2 (sin WebGPU)');
+  if (info.gpuPanels > 0 && !info.gpuBackend) info.gpuWarnings.push('VFX sin GPU: las viñetas con VFX se dibujan con DOM y sin efectos');
   const cdp = await page.context().newCDPSession(page);
   // captura PNG sin pérdida con compresión rápida (3× más rápida que page.screenshot)
   const shot = async () => Buffer.from((await cdp.send('Page.captureScreenshot', { format: 'png', optimizeForSpeed: true })).data, 'base64');
@@ -48,6 +52,7 @@ export async function renderVideo({ serverUrl, meta, outFile, quality = '1080', 
   let ffErr = '';
   ff.stderr.on('data', (d) => (ffErr += d));
   const ffDone = new Promise((res) => ff.on('exit', res));
+  let written = 0;
   const t0 = Date.now();
   try {
     for (let i = 0; i < frames; i++) {
@@ -56,6 +61,7 @@ export async function renderVideo({ serverUrl, meta, outFile, quality = '1080', 
       await page.evaluate((tt) => window.__comic.seek(tt), t);
       const buf = await shot();
       if (!ff.stdin.write(buf)) await new Promise((r) => ff.stdin.once('drain', r));
+      written++;
       const elapsed = (Date.now() - t0) / 1000;
       onProgress?.({ frame: i + 1, frames, elapsed, eta: (elapsed / (i + 1)) * (frames - i - 1) });
     }
@@ -69,8 +75,30 @@ export async function renderVideo({ serverUrl, meta, outFile, quality = '1080', 
   const code = await ffDone;
   await browser.close();
   if (code !== 0) throw new Error('ffmpeg falló: ' + ffErr);
+  const seconds = (Date.now() - t0) / 1000;
+  // el archivo tiene que tener exactamente los cuadros pedidos: ni salteados ni duplicados
+  if (written !== frames) throw new Error(`se capturaron ${written} cuadros de ${frames}`);
+  const counted = await countFrames(outFile);
+  if (counted !== frames) throw new Error(`el video tiene ${counted} cuadros y se esperaban ${frames} (${outFile})`);
   const pageErrors = logs.filter((l) => l.startsWith('[pageerror]') || l.startsWith('[error]'));
-  return { outFile, frames, seconds: (Date.now() - t0) / 1000, warnings: [...info.errors, ...pageErrors] };
+  return { outFile, frames, seconds, gpuBackend: info.gpuBackend, warnings: [...info.errors, ...info.gpuWarnings, ...pageErrors] };
+}
+
+// Cuenta los cuadros reales del archivo con ffprobe (-count_frames).
+export function countFrames(file) {
+  return new Promise((resolve, reject) => {
+    const p = spawn('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-count_frames', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', file], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (d) => (out += d));
+    p.stderr.on('data', (d) => (err += d));
+    p.on('error', reject);
+    p.on('exit', (c) => {
+      const n = parseInt(out.trim(), 10);
+      if (c !== 0 || !Number.isFinite(n)) reject(new Error('ffprobe falló: ' + err));
+      else resolve(n);
+    });
+  });
 }
 
 // Cuadros sueltos para revisar (Claude los mira con Read). times: segundos.
@@ -86,5 +114,5 @@ export async function snapshots({ serverUrl, meta, times, outDir, scale = 0.5 })
     files.push({ t: tt, file: f });
   }
   await browser.close();
-  return { files, duration: info.duration, warnings: [...info.errors, ...logs.filter((l) => /pageerror|\[error\]/.test(l))] };
+  return { files, duration: info.duration, gpuBackend: info.gpuBackend, warnings: [...info.errors, ...info.gpuWarnings, ...logs.filter((l) => /pageerror|\[error\]/.test(l))] };
 }

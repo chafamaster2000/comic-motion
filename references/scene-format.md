@@ -49,7 +49,7 @@ scenes   [ Scene ]           ← en orden de reproducción
   "variants": [ { "id": "v1", "status": "draft", "preset": "ono", "start": 1.2, "duration": 1.8, "ease": null, "params": { … } } ] }
 ```
 
-- `track` puede ser `camera`, `panel`, `fx`, `bubble` u `ono`. El preset tiene que ser del mismo kind.
+- `track` puede ser `camera`, `panel`, `vfx`, `fx`, `bubble` u `ono`. El preset tiene que ser del mismo kind.
 - `start` y `duration` son segundos relativos a la escena.
 
 **Estados:** `draft`, `approved` (una por holder como máximo), `rejected` (con `rejection` obligatorio desde el panel) y `hidden`. `active` es lo que se ve y se exporta. `approvedHash` marca una aprobación como **desactualizada** si después cambió el contenido. Las acciones de revisión se hacen desde el panel o se editan a mano respetando estas reglas. El historial queda en `history.jsonl`.
@@ -62,6 +62,7 @@ scenes   [ Scene ]           ← en orden de reproducción
 | `panel.crop` | px del asset original |
 | `panel.focus`, `kenBurns.fx/fy` | 0 a 1 dentro del recorte |
 | `speedLines`, `focusLines.center`, `flash`, `vignette` | pantalla (cuadro de salida), en px |
+| VFX `anchor`, `ctx.gpu.layer()` | página (`stage`), en px — las mismas que `panel.rect` |
 
 ## Efectos custom
 
@@ -84,3 +85,65 @@ export default {
 ```
 
 Regla de oro: `update(t)` depende **solo** de `t`, de `params` y de `ctx.rand`/`ctx.hashRand` con semilla. Nada de `Math.random()`, `Date.now()`, animaciones CSS ni `setTimeout`. Si no, el export no coincide con el preview.
+
+## VFX (pista `vfx`, GPU)
+
+Efectos con three.js (`WebGPURenderer`, cae solo a WebGL2) dibujados **dentro de una viñeta**. Presets built-in: `snow`, `sparks`, `burst` (partículas), `shockwave`, `heat` (deformación), `impactFlash`, `glow` (pases de pantalla). Params comunes:
+
+| param | tipo | qué hace |
+|---|---|---|
+| `target` | `clipRef` | clip id de la viñeta; vacío = la primera viñeta de la escena |
+| `anchor` | `anchor` `[x, y]` | punto en px de página (como `rect`); vacío = centro de la viñeta |
+| `layer` | `back` \| `mid` \| `front` | back = detrás del fondo, mid = entre el fondo (`bgfill`) y el recorte fg, front = delante de todo (incluso depthLock) |
+| `style` | `glow` \| `ink` | glow = aditivo con halo; ink = contorno de tinta (dos pasadas) y relleno plano |
+| `stepFps` | número | 0 = continuo; 12 = animado "de a dos" (t cuantizado) |
+| `intensity` | número | multiplicador general |
+
+**Modo GPU de la viñeta.** Si una viñeta tiene un VFX en capa `mid`/`back`, un VFX de deformación o de pantalla (`shockwave`, `heat`, `impactFlash`, `glow`) o `params.gpu: true`, three dibuja su contenido completo (fondo, recorte, depthLock, ken burns, filtros) con los mismos números que el DOM (`src/player/media.js`); la caja (borde, radio, sombra, tilt, entrada/salida) sigue siendo CSS. Si solo tiene VFX `front`, el canvas va encima de la imagen DOM. Las viñetas sin VFX no cambian. Filtros soportados en GPU: `css` (brightness, contrast, saturate, grayscale, sepia, invert, hue-rotate), `posterize`, `chroma`, `paper`, `halftone`; `ink` y los custom se ignoran (lo avisa `comic check`). En la GPU los filtros se aplican también a las partículas mid/back/front.
+
+Capas y parallax: los grupos de `ctx.gpu.layer()` están en px de página y se escalan con el empuje 2.5D según su profundidad (back 0, mid 0.5, front 1.25; el recorte fg es 1.1). La cámara y las transiciones son las del DOM.
+
+**Export:** `seek(t)` espera a la GPU (`onSubmittedWorkDone` / fence de WebGL) antes de capturar y `render` verifica con ffprobe que el archivo tiene exactamente los cuadros pedidos. Si three cae a WebGL2 el export avisa "VFX con WebGL2 (sin WebGPU)". `node test/gpu-parity.mjs` compara la misma viñeta en DOM y en GPU a 1080p y 4K.
+
+### Contrato de un VFX
+
+Built-in en `src/player/vfx/`, o custom en `effects/<id>.vfx.js` (mismo contrato; el sufijo `.vfx.js` es obligatorio):
+
+```js
+export default {
+  id: 'miVfx', kind: 'vfx', label: 'Mi VFX', gpu: true,
+  distort: false,   // true si muestrea la viñeta (fuerza modo GPU completo); también `post: true`
+  params: [ { key: 'target', type: 'clipRef', default: null }, { key: 'anchor', type: 'anchor', default: null },
+            { key: 'layer', type: 'select', options: ['back','mid','front'], default: 'mid' }, … ],
+  build(ctx) {
+    const { THREE, TSL, fx } = ctx.gpu;
+    const g = ctx.gpu.layer(ctx.params.layer);        // THREE.Group en px de página
+    g.add(new THREE.Mesh(geo, ctx.gpu.material({ fragment: TSL.vec4(rgb.mul(a), a) })));
+    return { update(t) { /* uniforms que dependan de t; SOLO función de t */ } };
+  },
+};
+```
+
+`ctx` trae lo de siempre (params, duration, stage, fps, seed, rand, hashRand, panelRect, …) más `ctx.gpu`:
+
+| miembro | qué es |
+|---|---|
+| `THREE`, `TSL` | los módulos `three/webgpu` y `three/tsl` (usá estos, no importes three aparte) |
+| `target` | clip id de la viñeta destino |
+| `mode` | `'full'` \| `'overlay'` |
+| `time` | uniform float: t local del clip (ya cuantizado por `stepFps`); lo actualiza el player |
+| `enabled` | uniform float 0/1: el clip está activo (el efecto puede apagarlo antes, ej. fuera de `at`) |
+| `layer(name='mid')` | nuevo `THREE.Group` en px de página dentro de la capa `back`\|`mid`\|`front`\|`screen` (screen = encima de todo, sin parallax). El player lo oculta fuera del clip |
+| `screen()` | = `layer('screen')` |
+| `layerPx(name)` | uniform: px de dispositivo por px de página en esa capa (para antialias/tamaño mínimo) |
+| `pxScale` | uniform: px de dispositivo por px local de la viñeta |
+| `material({ fragment, position?, blend: 'normal'\|'add' })` | `MeshBasicNodeMaterial` sin depth, doble cara, en **premultiplicado**: `fragment` devuelve `vec4(rgb*a, a)`; en `add` devolvé alfa 0 |
+| `particles(spec, layerName)` | partículas analíticas instanciadas. `spec: { count, motion({ r0, r1, t, idx, fx }) → { pos, vel, size, alpha, color }, style: 'glow'\|'ink'\|'soft', blend, shutter, stretch, soft, halo, outline, outlineColor }`. `r0`/`r1` = dos vec4 aleatorios por partícula (mulberry32 en JS). `pos`/`vel` en px de página; se estira según `vel` (motion blur) |
+| `post(fn, { sample, order })` | pase de post sobre la viñeta (solo modo completo). `fn(io) → vec4` con `io = { color, sample(uv), uv, pagePos, localPos, framePos, pageToUv(P), pageDeltaToUv(d), pxScale, inner, panelTexture }`. `sample: true` si muestrea en otro uv (deformaciones). Se aplica solo mientras `enabled` = 1 |
+| `bloom({ strength, radius, threshold, order })` | bloom (BloomNode de three) sobre la viñeta; devuelve `{ strength, radius, threshold }` (uniforms) |
+| `panelTexture()` | textura de la viñeta compuesta ANTES de los pases de post (usable solo dentro de `post`) |
+| `uniform(v)` | crea un uniform TSL |
+| `randoms(n, salt)` | `Float32Array` de n aleatorios con la semilla del clip |
+| `fx` | helpers TSL: `hash(uint)` (PCG entero), `hash2(a,b)`, `noise(vec2\|vec3)` (Perlin), `ballistic(p0, v0, g, k, τ) → vec4(pos, vel)` (gravedad + drag lineal, forma cerrada), `pulse(x,a,b)`, `heat(u) → vec3` (temperatura de color) |
+
+Reglas: nada de `Math.random`, `Date.now` ni `fract(sin())`; los aleatorios salen de la semilla (`r0/r1`, `randoms`, `fx.hash`). Todo en función de `t`: `update(t)` puede tocar uniforms, nunca acumular estado.

@@ -9,7 +9,8 @@ async function main() {
   // zoom (no transform): Chrome rasteriza a la resolución final, nítido en 4K
   const scale = parseFloat(q.get('scale') || '1');
   if (scale !== 1) root.style.zoom = String(scale);
-  const player = createPlayer(root, { scene, baseUrl: '/p/', fontBase: '/fonts/', customDefs });
+  // pixelScale explícito: el zoom CSS no agranda el backing de los canvas GPU por sí solo
+  const player = createPlayer(root, { scene, baseUrl: '/p/', fontBase: '/fonts/', customDefs, pixelScale: scale * (window.devicePixelRatio || 1), layoutZoom: scale * (window.devicePixelRatio || 1), forceWebGL: q.get('webgl') === '1' });
   await document.fonts.load("700 40px 'Comic Neue'");
   await document.fonts.load("40px 'Bangers'");
   window.__comic = {
@@ -17,7 +18,13 @@ async function main() {
     fps: scene.meta.fps || 24,
     errors: player.errors,
     seek: (t) => player.seek(t),
+    get gpuBackend() {
+      return player.gpuBackend;
+    },
+    gpuPanels: player.gpuPanelCount,
   };
+  // viñetas GPU: esperar a que three inicialice para poder informar el backend
+  await player.gpuReady();
   if (q.has('t')) await player.seek(parseFloat(q.get('t')));
   window.__comicReady = true;
 }

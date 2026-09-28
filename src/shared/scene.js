@@ -10,10 +10,11 @@
 //                preset, start, duration, ease?, params }
 // status: 'draft' | 'approved' | 'rejected' | 'hidden'
 
-export const TRACKS = ['camera', 'panel', 'fx', 'bubble', 'ono'];
+export const TRACKS = ['camera', 'panel', 'vfx', 'fx', 'bubble', 'ono'];
 export const TRACK_LABELS = {
   camera: 'Cámara',
   panel: 'Viñetas',
+  vfx: 'VFX',
   fx: 'Efectos',
   bubble: 'Globos',
   ono: 'Onomatopeyas',

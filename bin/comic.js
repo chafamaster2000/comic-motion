@@ -43,7 +43,9 @@ const HELP = `comic <comando> <proyecto> [opciones]
   presets                             catálogo de presets y params (markdown)
   snapshot <dir> --t 0.5,2,3.4 [--scale 0.5] [--scene s2]   cuadros PNG para mirar
   studio <dir> [--port 4777] [--open]   levanta el panel
-  render <dir> [--quality 1080|4k] [--codec h264|prores] [--fps 24|30|60] [--from s --to s] [--out f.mp4]`;
+  render <dir> [--quality 1080|4k] [--codec h264|prores] [--fps 24|30|60] [--from s --to s] [--out f.mp4]
+
+  test de paridad DOM/GPU: node test/gpu-parity.mjs [--webgl] [--keep]`;
 
 async function withServer(dir, fn) {
   ensureBuilt();
@@ -59,7 +61,7 @@ async function main() {
   if (!cmd || cmd === 'help' || flags.help) return console.log(HELP);
   if (cmd === 'presets') {
     const { builtin } = catalog(null);
-    const kinds = ['transition', 'camera', 'panel', 'filter', 'fx', 'bubble', 'ono'];
+    const kinds = ['transition', 'camera', 'panel', 'filter', 'vfx', 'fx', 'bubble', 'ono'];
     for (const k of kinds) {
       console.log(`\n## ${k}`);
       for (const d of builtin.filter((x) => x.kind === k)) {
@@ -204,7 +206,7 @@ async function main() {
       }),
     );
     for (const w of r.warnings) console.log('⚠ ' + w);
-    return console.log(`✓ ${r.outFile}  (${r.frames} cuadros en ${r.seconds.toFixed(1)}s)`);
+    return console.log(`✓ ${r.outFile}  (${r.frames} cuadros verificados con ffprobe, ${r.seconds.toFixed(1)}s${r.gpuBackend ? ', VFX con ' + r.gpuBackend : ''})`);
   }
 
   if (cmd === 'studio') {
