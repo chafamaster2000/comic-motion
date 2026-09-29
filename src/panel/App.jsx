@@ -51,6 +51,7 @@ export function App() {
   const innerRef = useRef(null);
   const [buildTick, setBuildTick] = useState(0); // sube cada vez que el player reconstruye
   const [gpuBackend, setGpuBackend] = useState(null);
+  const [playerWarnings, setPlayerWarnings] = useState([]); // avisos de los presets (p.ej. move3d limitó el amount)
   const [draft, setDraft] = useState(false);
   const draftRef = useRef(false);
   const [pick, setPick] = useState(null); // { key, target } mientras se apunta en el preview
@@ -128,6 +129,7 @@ export function App() {
       playerRef.current.setScene(scene, customDefs);
     }
     setGpuBackend(playerRef.current.gpuBackend ?? null);
+    setPlayerWarnings([...(playerRef.current.warnings || [])]);
     setBuildTick((n) => n + 1);
   }, [scene, customDefs]);
 
@@ -496,6 +498,7 @@ export function App() {
           pickingKey={pick?.key}
           draft={draft}
           askConfirm={askConfirm}
+          playerWarnings={playerWarnings}
           openGuide={openGuide}
           onLayerHot={setLayerHot}
         />

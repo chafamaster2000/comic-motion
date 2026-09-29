@@ -234,7 +234,7 @@ export function startServer({ projectDir, port = 0, host = '127.0.0.1', withQueu
         const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
         const name = `${(scene.meta.title || 'comic').replace(/[^\w-]+/g, '_')}_${body.quality || '1080'}_${stamp}.mp4`;
         const outFile = path.join(project.dir, 'exports', name);
-        render = { status: 'running', quality: body.quality || '1080', codec: body.codec || 'h264', frame: 0, frames: 0 };
+        render = { status: 'running', quality: body.quality || '1080', codec: body.codec || 'h264', frame: 0, frames: 0, workers: body.workers || 'auto' };
         stopRender = false;
         send('render', render);
         renderVideo({
@@ -245,6 +245,8 @@ export function startServer({ projectDir, port = 0, host = '127.0.0.1', withQueu
           codec: body.codec,
           from: body.from,
           to: body.to,
+          // 'auto' | 1..8 navegadores en paralelo (render.js)
+          workers: body.workers && body.workers !== 'auto' ? +body.workers : 'auto',
           shouldStop: () => stopRender,
           onProgress: (pr) => {
             render = { ...render, ...pr };

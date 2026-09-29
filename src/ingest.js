@@ -5,7 +5,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import sharp from 'sharp';
-import { roleFromName, ROLE_DEPTH, GLOBAL_BG_DEPTH, CHARACTER_DEPTH_RANGE, resolveLayers, wordsOf } from './player/layers.js';
+import { roleFromName, ROLE_DEPTH, GLOBAL_BG_DEPTH, CHARACTER_DEPTH_RANGE, resolveLayers, wordsOf, readingOrder } from './player/layers.js';
 
 const IMG = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif', '.tif', '.tiff'];
 const VID = ['.mp4', '.mov', '.webm', '.mkv', '.m4v', '.avi'];
@@ -297,6 +297,97 @@ function boxBlur(src, w, h, r, passes) {
 // Devuelve las decisiones para imprimir la tabla. Ver references/scene-format.md, "Viñetas por capas".
 
 // alfa de una capa volcado a un buffer del tamaño del lienzo (lo que cae fuera del lienzo se descarta)
+// px de alfa (>= 16) dentro del lienzo y su centroide en px del lienzo
+function alphaStats(A, W, H) {
+  let area = 0;
+  let sx = 0;
+  let sy = 0;
+  for (let y = 0; y < H; y++)
+    for (let x = 0, i = y * W; x < W; x++, i++)
+      if (A[i] >= 16) {
+        area++;
+        sx += x;
+        sy += y;
+      }
+  return { area, cx: area ? sx / area : W / 2, cy: area ? sy / area : H / 2 };
+}
+
+// ---------- alias semánticos de capas (tags) ----------
+// Heurística (ver references/scene-format.md, "Tags"):
+//   hero      personaje principal: max(área de alfa · (0.75 + 0.5·cercanía) · (1 − 0.6·distancia al centro)),
+//             cercanía 0 = el de más atrás … 1 = el de más adelante; distancia del centroide al centro del
+//             lienzo normalizada a la media diagonal. Así gana el más grande/cercano y, a igual tamaño, el centrado.
+//   char-1..n personajes de atrás hacia adelante (depth, luego z)
+//   bg-main   el fondo no global con más área; bg-far el global/lejano (depth mínima) si es otro
+//   fx-front  el fx de más adelante · text-1..n textos en orden de lectura (sin adornos) · divider los divisores
+// `layers`: capas del asset con role/depth/z/x/y/w/h y `stats` { area, cx, cy } por id.
+export function computeLayerTags(layers, W, H, stats) {
+  const tags = Object.fromEntries(layers.map((l) => [l.id, []]));
+  const st = (l) => stats[l.id] || { area: 0, cx: l.x + l.w / 2, cy: l.y + l.h / 2 };
+  const chars = layers.filter((l) => l.role === 'character').sort((a, b) => (a.depth ?? 1) - (b.depth ?? 1) || a.z - b.z);
+  chars.forEach((l, i) => tags[l.id].push(`char-${i + 1}`));
+  if (chars.length) {
+    const half = Math.hypot(W, H) / 2;
+    const score = (l, i) => {
+      const s = st(l);
+      const near = chars.length > 1 ? i / (chars.length - 1) : 1;
+      const dist = Math.min(1, Math.hypot(s.cx - W / 2, s.cy - H / 2) / half);
+      return (s.area / (W * H)) * (0.75 + 0.5 * near) * (1 - 0.6 * dist);
+    };
+    let best = 0;
+    chars.forEach((l, i) => {
+      if (score(l, i) > score(chars[best], best)) best = i;
+    });
+    tags[chars[best].id].unshift('hero');
+  }
+  const bgs = layers.filter((l) => l.role === 'background');
+  const main = [...bgs.filter((l) => !l.global)].sort((a, b) => st(b).area - st(a).area)[0] || bgs.find((l) => l.global);
+  if (main) tags[main.id].push('bg-main');
+  const far = bgs.filter((l) => l !== main).sort((a, b) => (a.depth ?? 0) - (b.depth ?? 0) || !!b.global - !!a.global || st(b).area - st(a).area)[0];
+  if (far && (!main || (far.depth ?? 0) <= (main.depth ?? 0))) tags[far.id].push('bg-far');
+  const fx = layers.filter((l) => l.role === 'fx').sort((a, b) => (b.depth ?? 1) - (a.depth ?? 1) || b.z - a.z)[0];
+  if (fx) tags[fx.id].push('fx-front');
+  const texts = layers.filter((l) => l.role === 'text' && !l.attachedTo);
+  readingOrder(texts).forEach((l, i) => tags[l.id].push(`text-${i + 1}`));
+  for (const l of layers) if (l.role === 'divider') tags[l.id].push('divider');
+  return tags;
+}
+
+// Escribe tags en las capas del asset sin pisar lo editado a mano: `tagsAuto` guarda la última propuesta
+// automática; si `tags` difiere de ella, alguien lo editó y se conserva (salvo `reset`).
+// Devuelve [{ id, tags, auto, kept }].
+export function applyLayerTags(asset, auto, { prev = null, reset = false } = {}) {
+  const prevById = new Map((prev?.layers || []).map((l) => [l.id, l]));
+  const out = [];
+  const isEdited = (old) => !reset && Array.isArray(old.tags) && JSON.stringify(old.tags) !== JSON.stringify(old.tagsAuto || []);
+  // un tag puesto a mano en una capa se saca de las propuestas automáticas de las demás (ej. @hero a mano)
+  const manual = new Set(asset.layers.flatMap((l) => (isEdited(prevById.get(l.id) || l) ? (prevById.get(l.id) || l).tags : [])));
+  for (const l of asset.layers) {
+    const old = prevById.get(l.id) || l;
+    const a = auto[l.id] || [];
+    const edited = isEdited(old);
+    // tagsAuto = lo que se propuso automáticamente para ESTA capa (ya sin los tags tomados a mano por otra)
+    l.tagsAuto = edited ? a : a.filter((t) => !manual.has(t));
+    l.tags = edited ? old.tags : l.tagsAuto;
+    if (!l.tags.length) delete l.tags;
+    if (!l.tagsAuto.length) delete l.tagsAuto;
+    out.push({ id: l.id, tags: l.tags || [], auto: a, kept: edited });
+  }
+  return out;
+}
+
+// `comic tags`: recalcula los tags de un asset de capas ya ingestado (lee el alfa de los PNG).
+export async function retagLayersAsset(project, asset, { reset = false } = {}) {
+  const W = asset.w;
+  const H = asset.h;
+  const stats = {};
+  for (const l of asset.layers) {
+    if (!['character', 'background'].includes(l.role)) continue;
+    stats[l.id] = alphaStats(await canvasAlpha(path.join(project.dir, l.file), l.x, l.y, W, H), W, H);
+  }
+  return applyLayerTags(asset, computeLayerTags(asset.layers, W, H, stats), { reset });
+}
+
 async function canvasAlpha(file, x, y, W, H) {
   const { data, info } = await sharp(file).ensureAlpha().extractChannel(3).raw().toBuffer({ resolveWithObject: true });
   const out = new Uint8Array(W * H);
@@ -394,9 +485,8 @@ export async function ingestLayers(project, scene, layoutFile, { exclude = [], m
     // alfas en coords del lienzo
     for (const l of L) {
       l.A = await canvasAlpha(l.src, l.x, l.y, W, H);
-      let area = 0;
-      for (let i = 0; i < l.A.length; i++) if (l.A[i] >= 16) area++;
-      l.area = area;
+      Object.assign(l, alphaStats(l.A, W, H));
+      const area = l.area;
       const bx = Math.max(0, Math.min(W, l.x + l.w) - Math.max(0, l.x));
       const by = Math.max(0, Math.min(H, l.y + l.h) - Math.max(0, l.y));
       l.coverage = (bx * by) / (W * H);
@@ -569,10 +659,13 @@ export async function ingestLayers(project, scene, layoutFile, { exclude = [], m
       source: { layout: path.resolve(layoutFile), scene: sc.scene, psd: doc.source || null, preview: sc.preview ? path.join(srcDir, sc.preview) : null },
     };
     for (const k of Object.keys(asset)) if (asset[k] === undefined) delete asset[k];
+    // alias semánticos (@hero, @bg-main, …); conserva los tags editados a mano de una ingesta anterior
+    const tagInfo = applyLayerTags(asset, computeLayerTags(asset.layers, W, H, Object.fromEntries(L.map((l) => [l.id, { area: l.area, cx: l.cx, cy: l.cy }]))), { prev: prev?.type === 'layers' ? prev : null });
+    const tagsOf = Object.fromEntries(tagInfo.map((t) => [t.id, t]));
     scene.assets[assetId] = asset;
     let sceneId = null;
     if (makeScenes) sceneId = addLayersScene(scene, assetId, asset);
-    results.push({ assetId, sceneId, asset, decisions: L.map((l) => ({ id: l.id, role: l.role, why: l.why, depth: l.depth, clipTo: l.clipTo || null, clip: l.clip?.best || null, breakout: l.breakout || 0, keepOrder: !!l.keepOrder, blockedBy: l.blockedBy, attachedTo: l.attachedTo, dividerOf: l.dividerOf, global: l.global })) });
+    results.push({ assetId, sceneId, asset, decisions: L.map((l) => ({ id: l.id, role: l.role, why: l.why, depth: l.depth, clipTo: l.clipTo || null, clip: l.clip?.best || null, breakout: l.breakout || 0, keepOrder: !!l.keepOrder, blockedBy: l.blockedBy, attachedTo: l.attachedTo, dividerOf: l.dividerOf, global: l.global, tags: tagsOf[l.id]?.tags || [], tagsKept: !!tagsOf[l.id]?.kept })) });
     for (const l of L) delete l.A;
   }
   return results;

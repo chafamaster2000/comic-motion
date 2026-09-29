@@ -8,7 +8,7 @@ import { layersAssetOf, isLayersParam, isLayerPairParam, layersFrontToBack } fro
 
 const STATUS_LABEL = { draft: 'borrador', approved: 'aprobada', rejected: 'rechazada', hidden: 'escondida', stale: 'aprobada · desactualizada' };
 
-export function Inspector({ studio, scene, presets, selection, setSelection, requests, activate, layout, pickAnchor, pickingKey, draft, askConfirm, openGuide, onLayerHot }) {
+export function Inspector({ studio, scene, presets, selection, setSelection, requests, activate, layout, pickAnchor, pickingKey, draft, askConfirm, openGuide, onLayerHot, playerWarnings = [] }) {
   const t = selection ? findTarget(scene, selection) : {};
   const byKind = useMemo(() => {
     const m = {};
@@ -79,6 +79,14 @@ export function Inspector({ studio, scene, presets, selection, setSelection, req
           <h4>
             Ajustes de <em>{v.id}</em> <span className="dim">(se guardan en la variante activa)</span>
           </h4>
+          {isClip &&
+            playerWarnings
+              .filter((w) => w.startsWith(`${selection.scene}/${selection.clip}: `))
+              .map((w) => (
+                <div key={w} className="warnbox">
+                  ⚠ {w.slice(`${selection.scene}/${selection.clip}: `.length)}
+                </div>
+              ))}
           {isClip ? (
             <ClipEditor v={v} holder={holder} editActive={editActive} byKind={byKind} presets={presets} scene={scene} sceneVariant={t.sceneVariant} pickAnchor={pickAnchor} pickingKey={pickingKey} onLayerHot={onLayerHot ? (id) => onLayerHot(id && (typeof id === 'object' ? { ...baseTarget, ...id } : { ...baseTarget, layer: id })) : null} />
           ) : (

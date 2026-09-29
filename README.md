@@ -127,7 +127,7 @@ node ~/.claude/skills/comic-motion/bin/comic.js <comando>
   presets                             catálogo de presets y parámetros
   snapshot <dir> --t 0.5,2,3.4        cuadros PNG sueltos
   studio <dir> [--port 4777] [--open] panel de revisión
-  render <dir> [--quality 1080|4k] [--codec h264|prores] [--fps 24|30|60] [--from s --to s]
+  render <dir> [--quality 1080|4k] [--codec h264|prores] [--fps 24|30|60] [--from s --to s] [--workers auto|1-8]
 ```
 
 ## Un proyecto por dentro
@@ -181,6 +181,23 @@ Desde el botón **Exportar video** del panel (o `comic render`) elegís resoluci
 ### Rendimiento
 
 Medido con GPU en Apple Silicon: 1080p ≈ 2 a 3 veces el tiempo real y 4K ≈ 7 veces. Los filtros SVG (tinta, colores planos) son lo más caro. Sin GPU pueden ser bastante más lentos.
+
+**Export en paralelo.** El tramo se parte en N tramos contiguos de cuadros (**En paralelo** en el diálogo, `--workers` en la CLI; *Auto* = la mitad de los núcleos, hasta 4). Cada tramo lo renderiza su propio Chromium con su propio ffmpeg, con el mismo códec y los mismos parámetros, y al final se unen con el concat de ffmpeg **sin recodificar** (`-c copy`). Como el render es función pura de `t` y cada cuadro usa el mismo `t = desde + i/fps` que en serie, los cuadros son los mismos: en ProRes el resultado es idéntico bit a bit al de 1 navegador (`node test/export-parity.mjs` lo comprueba). En H.264 cada tramo arranca en un keyframe, así que el bitstream cambia en las uniones pero la calidad es la misma (CRF 16) y los cuadros son los mismos; el archivo final se verifica con `ffprobe -count_frames`. Cancelar o un error en cualquier tramo corta todos y borra los temporales.
+
+Medido en una Mac mini M4 (10 núcleos), proyecto por capas con VFX, 31,2 s a 1080p60 (1872 cuadros), H.264:
+
+| | tiempo | ms/cuadro |
+|---|---|---|
+| antes (1 navegador, 2 rAF por cuadro) | 215 s | 115 |
+| 1 navegador | 183 s | 98 |
+| 2 en paralelo | 141 s | 75 |
+| 3 en paralelo | 102 s | 54 |
+| 4 en paralelo (Auto) | 92 s | 49 |
+| 6 en paralelo | 99 s | 53 |
+
+4K (3 s, 180 cuadros): 89 s antes, 44 s con 4 en paralelo. Un navegador por tramo rinde bastante más que varias pestañas o contextos del mismo navegador (49 contra 75 ms/cuadro con 4): la captura PNG se serializa dentro de cada navegador.
+
+Otras cosas que se midieron: la espera por cuadro bajó de 2 `requestAnimationFrame` a 1 (la captura ya fuerza un cuadro nuevo; comparado bit a bit en 348 cuadros seguidos con transiciones, VFX, capas y video: idénticos). La captura sigue en PNG con `optimizeForSpeed` (≈ 110 ms por cuadro a 1080p en serie): PNG normal tarda 1 s, WebP calidad 100 (sin pérdida) 0,9 s, JPEG y screencast pierden calidad, y `HeadlessExperimental.beginFrame` no existe en macOS.
 
 ## Limitaciones conocidas
 

@@ -7,6 +7,8 @@ import path from 'node:path';
 import { SKILL_DIR } from './project.js';
 import { runClaude } from './claude.js';
 import { targetContext, writeCatalog } from './generator.js';
+import { layersSummary } from './recipes/geometry.js';
+import { listRecipes } from './recipes/index.js';
 import { findTarget, activeVariant } from './shared/scene.js';
 
 const OPEN = ['thinking', 'question', 'done', 'error'];
@@ -144,6 +146,7 @@ export function createGuides(project, { queue, onChange }) {
     if (!target) {
       return {
         ...base,
+        recipes: listRecipes(),
         scenes: scene.scenes.map((s) => {
           const v = activeVariant(s);
           return {
@@ -152,6 +155,7 @@ export function createGuides(project, { queue, onChange }) {
             direction: s.direction,
             active: v?.id,
             duration: v?.duration,
+            ...(v && layersSummary(scene, v).length ? { layers: layersSummary(scene, v) } : {}),
             approved: s.variants.some((x) => x.status === 'approved'),
             note: v?.note,
             rejection: v?.rejection,

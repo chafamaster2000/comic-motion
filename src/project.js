@@ -3,11 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { BUILTIN, defaultsOf, ENTERS } from './player/presets.js';
-import { TRACKS, activeVariant, nextVariantId, findTarget, layoutScenes } from './shared/scene.js';
+import { BUILTIN, defaultsOf, ENTERS, withPanelDefaults } from './player/presets.js';
+import { TRACKS, activeVariant, nextVariantId, findTarget, layoutScenes, contentHash, effectiveContent, isStale } from './shared/scene.js';
 import { vfxNeeds } from './player/vfx/index.js';
 import { unsupportedGpuFilters } from './player/gpu/filter-support.js';
-import { LAYER_ROLES } from './player/layers.js';
+import { LAYER_ROLES, resolveLayerRef } from './player/layers.js';
+import { checkGaps as gapsOf, formatGap } from './player/camera3d.js';
 
 export const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -92,6 +93,18 @@ export function validate(scene, project) {
     else for (const [k, v] of Object.entries(d)) if (typeof v !== 'string') warnings.push(`${where}: direction.${k} no es texto`);
   };
   checkDirection(m.direction, 'meta');
+  // meta.panelDefaults: params por defecto de todas las viñetas (se mergean debajo de los de cada variante al construir)
+  if (m.panelDefaults != null) {
+    const pd = m.panelDefaults;
+    if (typeof pd !== 'object' || Array.isArray(pd)) errors.push('meta.panelDefaults tiene que ser un objeto { param: valor }');
+    else {
+      const known = new Set((BUILTIN.find((d) => d.id === 'panel')?.params || []).map((p) => p.key));
+      for (const k of Object.keys(pd)) {
+        if (k === 'asset') errors.push('meta.panelDefaults.asset: el asset va en cada viñeta, no por defecto');
+        else if (!known.has(k)) warnings.push(`meta.panelDefaults.${k}: no es un param del preset panel`);
+      }
+    }
+  }
   const assetIds = new Set(Object.keys(scene.assets || {}));
   for (const [id, a] of Object.entries(scene.assets || {})) {
     if (!a.file) errors.push(`asset ${id}: falta file`);
@@ -120,7 +133,7 @@ export function validate(scene, project) {
       if (v.transition && ids.has(v.transition.preset) && kinds[v.transition.preset] !== 'transition') errors.push(`${w2}: ${v.transition.preset} no es una transición`);
       const clipIds = new Set();
       const panelOf = {};
-      for (const c of v.clips || []) if (c.track === 'panel') panelOf[c.id] = activeVariant(c);
+      for (const c of v.clips || []) if (c.track === 'panel' && activeVariant(c)) panelOf[c.id] = { ...activeVariant(c), params: withPanelDefaults(scene.meta, activeVariant(c).params) };
       const firstPanel = Object.keys(panelOf)[0] || null;
       const gpuMode = {};
       for (const c of v.clips || []) {
@@ -147,7 +160,7 @@ export function validate(scene, project) {
           else if (btw != null) {
             const ids = new Set(tAsset.layers.map((l) => l.id));
             if (!Array.isArray(btw) || btw.length !== 2) errors.push(`${w3}: between tiene que ser [idAtrás, idAdelante]`);
-            else for (const b of btw) if (!ids.has(b)) errors.push(`${w3}: between menciona la capa "${b}", que no está en ${panelOf[tgt].params.asset}`);
+            else for (const b of btw) if (!resolveLayerRef(tAsset.layers, b)) errors.push(`${w3}: between menciona la capa "${b}", que no está en ${panelOf[tgt].params.asset}`);
           }
           if (av.params?.z != null && typeof av.params.z !== 'number') errors.push(`${w3}: z tiene que ser un número (escala depth 0..2)`);
         }
@@ -185,8 +198,14 @@ export function validate(scene, project) {
           if (a && !assetIds.has(a)) errors.push(`${w4}: asset desconocido ${a}`);
           if (cv.preset === 'panel' && !a) warnings.push(`${w4}: viñeta sin asset`);
           if (cv.preset === 'panel' && cv.params?.depth && a && scene.assets[a]?.type !== 'layers' && !scene.assets[a]?.cutout) warnings.push(`${w4}: depth>0 pero el asset ${a} no tiene cutout (comic cutout)`);
-          if (cv.preset === 'panel' && a && scene.assets[a]?.type === 'layers') checkLayerOverrides(w4, scene.assets[a], cv.params, errors, warnings);
+          if (cv.preset === 'panel' && a && scene.assets[a]?.type === 'layers') checkLayerOverrides(w4, scene.assets[a], withPanelDefaults(scene.meta, cv.params), errors, warnings);
           else if (cv.preset === 'panel' && cv.params?.layers) warnings.push(`${w4}: params.layers solo sirve con un asset type 'layers'`);
+          // referencias semánticas a capas ('@tag' / 'layer:<id>') en la cámara: tienen que resolver en una viñeta por capas de la escena
+          if (c.track === 'camera') {
+            const refs = [cv.params?.target, ...(Array.isArray(cv.params?.shots) ? cv.params.shots.map((s) => s?.target) : [])].filter((r) => typeof r === 'string' && (r.startsWith('@') || r.startsWith('layer:')));
+            const layerSets = Object.values(panelOf).map((pv) => scene.assets?.[pv.params?.asset]).filter((x) => x?.type === 'layers').map((x) => x.layers);
+            for (const r of refs) if (!layerSets.some((ls) => resolveLayerRef(ls, r))) errors.push(`${w4}: target "${r}" no resuelve a ninguna capa de las viñetas por capas de la escena (comic tags)`);
+          }
           for (const f of cv.params?.filters || []) if (!ids.has(f.preset) && !custom.has(f.preset)) errors.push(`${w4}: filtro desconocido ${f.preset}`);
           if (cv.preset === 'camera') for (const k of cv.params?.keys || []) if (k.panel && !(v.clips || []).some((x) => x.id === k.panel)) errors.push(`${w4}: la cámara apunta a la viñeta ${k.panel} que no existe`);
         }
@@ -229,15 +248,22 @@ function checkLayerOverrides(where, asset, params, errors, warnings) {
   if (ov != null && (typeof ov !== 'object' || Array.isArray(ov))) return errors.push(`${where}: params.layers tiene que ser { idCapa: { … } }`);
   for (const [lid, o] of Object.entries(ov || {})) {
     const w = `${where}/capa ${lid}`;
-    if (!ids.has(lid)) {
+    if (lid.startsWith('@') || lid.startsWith('layer:')) {
+      const rid = resolveLayerRef(asset.layers, lid);
+      if (!rid) {
+        errors.push(`${w}: "${lid}" no resuelve a ninguna capa (comic tags)`);
+        continue;
+      }
+    } else if (!ids.has(lid)) {
       warnings.push(`${w}: la capa no existe en el asset (override ignorado)`);
       continue;
     }
     if (o.role != null && !LAYER_ROLES.includes(o.role)) errors.push(`${w}: rol inválido ${o.role} (${LAYER_ROLES.join('|')})`);
     if (o.depth != null && typeof o.depth !== 'number') errors.push(`${w}: depth tiene que ser un número (0..2)`);
     if (o.clipTo) {
-      if (!ids.has(o.clipTo)) errors.push(`${w}: clipTo "${o.clipTo}" no existe`);
-      else if (o.clipTo === lid) errors.push(`${w}: clipTo a sí misma`);
+      const cid = resolveLayerRef(asset.layers, o.clipTo);
+      if (!cid) errors.push(`${w}: clipTo "${o.clipTo}" no existe`);
+      else if (cid === (resolveLayerRef(asset.layers, lid) || lid)) errors.push(`${w}: clipTo a sí misma`);
     }
     for (const k of ['at', 'dur']) if (o[k] != null && !(typeof o[k] === 'number' && o[k] >= 0)) errors.push(`${w}: ${k} tiene que ser segundos >= 0`);
     for (const k of ['enter', 'exit']) {
@@ -290,4 +316,45 @@ export function mergeGenerated(scene, target, raw, { parent, instruction, reques
   for (const k of Object.keys(v)) if (v[k] === undefined) delete v[k];
   holder.variants.push(v);
   return v;
+}
+
+// ---------- meta.panelDefaults ----------
+// Sube a meta.panelDefaults los params que TODAS las variantes de viñeta del proyecto tienen con el mismo valor
+// y los saca de las variantes. El render no cambia (se mergean debajo al construir), así que las aprobaciones
+// que estaban al día se re-sellan con el hash nuevo; las que ya estaban desactualizadas quedan como estaban.
+export function hoistPanelDefaults(scene, { exclude = ['asset', 'layers', 'rect', 'kenBurns', 'focus'] } = {}) {
+  const panels = [];
+  for (const s of scene.scenes || []) for (const v of s.variants || []) for (const c of v.clips || []) if (c.track === 'panel') for (const cv of c.variants || []) panels.push(cv);
+  if (!panels.length) return { hoisted: {}, variants: 0, restamped: 0 };
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const cur = scene.meta.panelDefaults || {};
+  const hoisted = {};
+  for (const k of Object.keys(panels[0].params || {})) {
+    if (exclude.includes(k)) continue;
+    const val = panels[0].params[k];
+    if (k in cur && !same(cur[k], val)) continue;
+    if (panels.every((p) => p.params && k in p.params && same(p.params[k], val))) hoisted[k] = val;
+  }
+  if (!Object.keys(hoisted).length) return { hoisted, variants: panels.length, restamped: 0 };
+  // aprobaciones al día antes del cambio (clips primero: el hash de escena depende de sus clips activos)
+  const fresh = [];
+  for (const s of scene.scenes || [])
+    for (const v of s.variants || []) {
+      for (const c of v.clips || []) for (const cv of c.variants || []) if (cv.status === 'approved' && cv.approvedHash && !isStale(cv, 'clip')) fresh.push([cv, 'clip']);
+      if (v.status === 'approved' && v.approvedHash && !isStale(v, 'scene')) fresh.push([v, 'scene']);
+    }
+  scene.meta.panelDefaults = { ...cur, ...hoisted };
+  for (const p of panels) for (const k of Object.keys(hoisted)) delete p.params[k];
+  for (const [v, level] of fresh) v.approvedHash = contentHash(effectiveContent(v, level));
+  return { hoisted, variants: panels.length, restamped: fresh.length };
+}
+
+// ---------- huecos de cámara (comic check --gaps) ----------
+// Muestrea cada escena a 4 fps con la cámara compuesta (misma función que el player) y devuelve líneas legibles:
+// bordes vacíos de fondos en viñetas por capas, vista fuera de la página/viñeta, textos y globos cortados,
+// regiones de VFX fuera de su viñeta, y los avisos de move3d (amount limitado). Tiempos locales a la escena.
+export function checkGaps(scene, { fps = 4 } = {}) {
+  const presets = Object.fromEntries(BUILTIN.map((d) => [d.id, d]));
+  const { issues, warnings } = gapsOf(scene, presets, { fps });
+  return { issues, lines: issues.map(formatGap), warnings };
 }

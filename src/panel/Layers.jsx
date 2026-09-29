@@ -1,5 +1,6 @@
 // Editor de capas de una viñeta con asset `type: 'layers'`, y editor `between` de los VFX.
 import React, { useState } from 'react';
+import { layerOverridesById } from '../player/layers.js';
 import { AnimatePresence, motion } from 'motion/react';
 import { ENTERS } from '../player/presets.js';
 import { Num, EaseSelect } from './Fields.jsx';
@@ -9,7 +10,9 @@ const thumbUrl = (file) => (file ? '/p/' + String(file).replace(/^\/+/, '') : nu
 const presetOf = (spec) => (typeof spec === 'string' ? spec : spec?.preset) || 'none';
 const fmtNum = (n) => (Math.round(n * 100) / 100).toString();
 
-export function LayersEditor({ asset, value, onChange, fps = 24, onHot }) {
+export function LayersEditor({ asset, value: raw, onChange, fps = 24, onHot }) {
+  // las recetas pueden escribir overrides por @tag o layer:<id>: se muestran (y al editar se guardan) por id
+  const value = raw && asset?.layers ? layerOverridesById(asset.layers, raw) : raw;
   const [open, setOpen] = useState(null); // id con el desplegable de tiempos abierto
   const [sel, setSel] = useState(null); // capa fijada (resaltada aunque el mouse salga)
   const layers = layersFrontToBack(asset);
@@ -57,6 +60,11 @@ export function LayersEditor({ asset, value, onChange, fps = 24, onHot }) {
                 </button>
                 <div className="layer-name">
                   <b title={l.id}>{l.name || l.id}</b>
+                  {(l.tags || []).map((tg) => (
+                    <span key={tg} className="chip dim" title={`Alias: @${tg}`}>
+                      @{tg}
+                    </span>
+                  ))}
                   <span className="dim">z {l.z}</span>
                 </div>
                 <select className={'role-chip r-' + e.role + (ov.role ? ' ov' : '')} value={e.role || ''} title="Rol de la capa (define cómo la trata el motor)" onChange={(ev) => set(l, 'role', ev.target.value)}>

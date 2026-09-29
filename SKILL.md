@@ -51,7 +51,8 @@ Respetá `meta.direction` si existe (sale del guiado). Proponé al usuario, en p
 
 ### 4. Escribir la escena
 Editá `scene.json` siguiendo [references/scene-format.md](references/scene-format.md). Si hay archivos `references/*.local.md` con criterios propios, leelos y seguilos. Cada escena y cada clip arrancan con una variante `v1` en `draft`.
-- `comic check <dir>`: sin errores.
+- Con viñetas por capas, arrancá cada escena con una **receta** (`comic recipe <dir> <escena> <receta> [--target @tag]`, catálogo con `comic recipe --list`, cuál usar según la dirección en [references/camera-recipes.md](references/camera-recipes.md)) y la cámara con `move3d` apuntando a tags (`@hero`, `@bg-main`, `@text-1`; ver `comic tags`) en vez de keyframes con coordenadas a mano. Los params repetidos en todas las viñetas van en `meta.panelDefaults`.
+- `comic check <dir>`: sin errores. `comic check <dir> --gaps`: encuadres que dejan ver bordes o huecos.
 - `comic snapshot <dir> --t a,b,c`: sacá cuadros en los momentos clave (entrada de cada escena, cada golpe, cada globo) y **miralos**. Corregí globos que tapen caras, textos cortados y cámaras que muestren bordes vacíos.
 - Mostrale al usuario los cuadros revisados.
 
@@ -80,12 +81,13 @@ Editá `scene.json` siguiendo [references/scene-format.md](references/scene-form
 El export sale del botón **Exportar video** del panel, o de:
 
 ```
-comic render <dir> --quality 1080|4k [--codec prores] [--from s --to s]
+comic render <dir> --quality 1080|4k [--codec prores] [--from s --to s] [--workers auto|1-8]
 ```
 
 - Lo que se exporta es lo **activo**. El panel avisa si hay escenas sin aprobar.
 - Los **cuadros por segundo** son configuración del proyecto (`meta.fps`: 24, 30 o 60). Se eligen en la barra superior del panel (o con `init --fps`) y tanto el preview como el export usan ese fps. 24 da una sensación más de cómic o cine; 60 hace los paneos más fluidos y tarda unas 2,5 veces más en exportar.
 - Referencia en una Mac Apple Silicon con GPU: 1080p ≈ 2,2 veces el tiempo real y 4K ≈ 7 veces.
+- El export va **en paralelo** por defecto (`--workers auto`: la mitad de los núcleos, hasta 4; en el panel, "En paralelo"): cada navegador renderiza un tramo contiguo y los tramos se unen sin recodificar. Da los mismos cuadros que en serie y en una M4 tarda menos de la mitad. Con poca RAM o si la máquina está ocupada, `--workers 1`.
 
 **Terminado cuando:** el archivo existe en `exports/`, extrajiste 2 o 3 cuadros con ffmpeg y los miraste, y le pasaste al usuario la ruta y los cuadros.
 

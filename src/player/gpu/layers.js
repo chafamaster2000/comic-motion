@@ -16,13 +16,13 @@
 import * as THREE from 'three/webgpu';
 import * as TSL from 'three/tsl';
 import { layerState, vfxPlacement, dofOf, depthToZ } from '../layers.js';
+import { restEye, eyeFor, affOf, FOV_DEG } from '../bounds.js';
 
 const { Fn, uniform, vec2, vec4, float, texture: textureNode, uv, positionWorld, select, clamp, max, step } = TSL;
 
-// campo visual vertical de la cámara en reposo (solo importa para la órbita: el parallax por paneo y
-// dolly depende de Z/D0, que ya es adimensional)
-export const FOV_DEG = 30;
-const FOCAL_K = 1 / (2 * Math.tan((FOV_DEG * Math.PI) / 360));
+// La matemática de la cámara (reposo, ojo 3D a partir de la cámara 2D) vive en ../bounds.js, compartida con
+// move3d y `comic check --gaps`.
+export { FOV_DEG };
 const RO_BASE = 100;
 // span de la escala depth que usa el DOF para normalizar (0..2 → Z de 0.6 a −0.6)
 const DEPTHSPAN = 1.2;
@@ -52,17 +52,9 @@ export class LayersRig {
   restCamera() {
     if (this.rest) return this.rest;
     const { W, H } = this.panel;
-    const [rx, ry, rw, rh] = this.lx.rect;
-    const vw = Math.max(rw, rh * (W / H));
-    const sc = W / vw;
-    const cam0 = new DOMMatrix().translate(W / 2, H / 2).scale(sc).translate(-(rx + rw / 2), -(ry + rh / 2));
-    const L0 = this.lx.layout0;
-    const [ox, oy] = this.info.origin;
-    const G0 = cam0.multiply(new DOMMatrix([L0.k, 0, 0, L0.k, ox + L0.left, oy + L0.top]));
-    const s0 = Math.sqrt(Math.abs(G0.a * G0.d - G0.b * G0.c));
-    const c0 = apply(G0.inverse(), W / 2, H / 2);
-    const D0 = (FOCAL_K * H) / s0; // px del lienzo
-    this.rest = { cam0, G0, s0, c0, D0 };
+    const r = restEye({ W, H, rect: this.lx.rect, layout0: this.lx.layout0, origin: this.info.origin });
+    const { c0, D0 } = r;
+    this.rest = { ...r, cam0: new DOMMatrix(r.cam0) };
     this.u.c0.value.set(c0[0], c0[1]);
     this.u.d0.value = D0;
     return this.rest;
@@ -134,7 +126,8 @@ export class LayersRig {
           bg,
         };
       }
-      const blurTaps = dof.amount > 0 && r.role !== 'text';
+      // con un clip de cámara que anima el foco (move3d rackFocus) el desenfoque se prepara aunque el dof de la viñeta sea 0
+      const blurTaps = (dof.amount > 0 || !!panel.sceneRef?.camDof) && r.role !== 'text';
       const frag = Fn(() => {
         const q = uv();
         let col;
@@ -181,7 +174,7 @@ export class LayersRig {
       group.renderOrder = RO_BASE + RO_STEP * r.index;
       group.add(mesh);
       panel.scene.add(group);
-      this.items.push({ r, mesh, group, u, clip, tex: t });
+      this.items.push({ r, mesh, group, u, clip, tex: t, blurTaps });
     }
     panel.textures = [...texOf.values()];
   }
@@ -220,26 +213,23 @@ export class LayersRig {
     const { W, H } = panel;
     const lx = this.lx;
     const rest = this.restCamera();
-    const { c0, D0, s0 } = rest;
+    const { c0, D0 } = rest;
     const L = lx.layout;
     const [ox, oy] = this.info.origin;
     const Lm = new DOMMatrix([L.k, 0, 0, L.k, L.left, L.top]);
     const A = M.multiply(Lm); // lienzo (plano focal) → cuadro
-    // cámara 3D a partir de la cámara 2D (sin la caja): G = cámara · origen · ken burns
-    const cam = panel.sceneRef.cam || rest.cam0;
-    const G = cam.multiply(new DOMMatrix([L.k, 0, 0, L.k, ox + L.left, oy + L.top]));
-    const detG = G.a * G.d - G.b * G.c;
-    const s = Math.sqrt(Math.abs(detG)) || s0;
-    const C = Math.abs(detG) > 1e-12 ? apply(G.inverse(), W / 2, H / 2) : c0;
+    // cámara 3D a partir de la cámara 2D (sin la caja): G = cámara · origen · ken burns (bounds.js eyeFor)
+    const sref = panel.sceneRef;
+    const cam = sref.cam || rest.cam0;
     const ds = lx.params.depthScale ?? 1;
     const vis = this.items.filter((it) => !it.r.hidden);
     const zmin = Math.min(0, ...vis.map((it) => it.r.Z), ...[...this.slots.values()].map((sl) => sl.placement.Z || 0));
-    let D = (D0 * s0) / s;
-    D = Math.max(D, D0 * (-zmin + 0.15));
-    // órbita: la cámara se corre sobre un arco alrededor del punto enfocado (el plano focal no se mueve)
-    const [yaw, pitch] = lx.orbit || [0, 0];
-    const Cx = C[0] + D * Math.tan((yaw * Math.PI) / 180);
-    const Cy = C[1] + D * Math.tan((pitch * Math.PI) / 180);
+    // órbita: la cámara se corre sobre un arco alrededor del punto enfocado (el plano focal no se mueve);
+    // la de la viñeta más la de la cámara (move3d arc/crane). dist: dolly zoom de move3d (1 = sin cambio)
+    const po = lx.orbit || [0, 0];
+    const co = sref.orbit || [0, 0];
+    const eye = eyeFor({ W, H, cam: affOf(cam), layout: L, origin: [ox, oy], rest, zmin, orbit: [po[0] + co[0], po[1] + co[1]], dist: sref.dist ?? 1 });
+    const { D, Cx, Cy } = eye;
     this.u.cam.value.set(Cx, Cy, -D);
     // proyección: (X,Y,Z) → centro (Cx,Cy,−D) sobre z=0 → A → NDC
     const x = [1, 0, Cx / D, 0];
@@ -253,7 +243,8 @@ export class LayersRig {
     P.set(...rX, ...rY, ...rZ, ...w);
     panel.camera.projectionMatrixInverse.copy(P).invert();
     // capas
-    const dof = dofOf(lx.params.dof);
+    // foco animado de la cámara (move3d rackFocus) o el dof fijo de la viñeta
+    const dof = sref.dof ? dofOf(sref.dof) : dofOf(lx.params.dof);
     const pxs = panel.u.pxScale.value; // px de dispositivo por px local
     const devPerAsset = pxs * L.k;
     const states = lx.states || [];
@@ -273,7 +264,8 @@ export class LayersRig {
       it.mesh.matrix.set(g * a, g * c, 0, g * E + c0[0] * (1 - g), g * b, g * d, 0, g * F + c0[1] * (1 - g), 0, 0, 1, Zw, 0, 0, 0, 1);
       it.mesh.matrixWorldNeedsUpdate = true;
       if (it.clip) it.clip.zbg.value = it.clip.bg.Z * D0;
-      if (dof.amount > 0 && r.role !== 'text') {
+      if (it.blurTaps && !(dof.amount > 0)) it.u.blur.value.set(0, 0);
+      else if (it.blurTaps) {
         // radio en px del cuadro ∝ distancia (en la escala depth) al plano de foco
         const focusZ = depthToZ(dof.focus, ds);
         const rpx = dof.amount * 18 * Math.abs(r.Z - focusZ) / Math.max(0.05, DEPTHSPAN);

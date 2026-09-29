@@ -68,7 +68,8 @@ const normSpec = (s, fallbackDur) => {
 // Cada una: { id, name, file, x, y, w, h, z, role, depth, Z (en unidades de D0), hidden, at, dur, enter, exit,
 //             motion, clipTo, clipMask, keepOrder, index }
 export function resolveLayers(asset, params = {}, duration = 4) {
-  const ovAll = params.layers || {};
+  // overrides por id, '@tag' o 'layer:<id>' (los de id exacto pisan a los de tag)
+  const ovAll = layerOverridesById(asset?.layers, params.layers);
   const depthScale = params.depthScale ?? 1;
   const auto = params.autoTiming !== false;
   const out = [];
@@ -76,7 +77,7 @@ export function resolveLayers(asset, params = {}, duration = 4) {
     const ov = ovAll[l.id] || {};
     const role = LAYER_ROLES.includes(ov.role) ? ov.role : LAYER_ROLES.includes(l.role) ? l.role : 'character';
     const depth = typeof ov.depth === 'number' ? ov.depth : typeof l.depth === 'number' ? l.depth : ROLE_DEPTH[role];
-    const clipTo = 'clipTo' in ov ? ov.clipTo || null : l.clipTo || null;
+    const clipTo = 'clipTo' in ov ? (ov.clipTo ? resolveLayerRef(asset.layers, ov.clipTo) || ov.clipTo : null) : l.clipTo || null;
     out.push({
       ...l,
       role,
@@ -241,7 +242,10 @@ export function dofOf(dof) {
 export function vfxPlacement(resolved, { layer = 'mid', between = null, z = null } = {}, depthScale = 1) {
   const vis = resolved.filter((r) => !r.hidden);
   if (layer === 'screen') return { order: 1e4, Z: 0, screen: true };
-  const byId = (id) => vis.find((r) => r.id === id);
+  const byId = (ref) => {
+    const id = resolveLayerRef(resolved, ref);
+    return vis.find((r) => r.id === id);
+  };
   if (Array.isArray(between) && between.length === 2) {
     const a = byId(between[0]);
     const b = byId(between[1]);
@@ -271,4 +275,35 @@ export function vfxPlacement(resolved, { layer = 'mid', between = null, z = null
   if (!firstChar) return { order: vis[vis.length - 1].index + 0.5, Z: 0 };
   const prev = [...vis].reverse().find((r) => r.index < firstChar.index);
   return { order: firstChar.index - 0.5, Z: prev ? (prev.Z + firstChar.Z) / 2 : firstChar.Z };
+}
+
+// Referencia a una capa desde params: 'layer:<id>', '<id>' o '@<tag>' (tags que pone `comic layers`, p.ej. @hero, @bg-main).
+// Con '@tag' devuelve la primera capa (de adelante hacia atrás) que lo tenga. Devuelve el id o null.
+export function resolveLayerRef(layers, ref) {
+  if (!ref || typeof ref !== 'string' || !Array.isArray(layers)) return null;
+  if (ref.startsWith('@')) {
+    const tag = ref.slice(1);
+    const hit = [...layers].sort((a, b) => (b.z ?? 0) - (a.z ?? 0)).find((l) => (l.tags || []).includes(tag));
+    return hit ? hit.id : null;
+  }
+  const id = ref.startsWith('layer:') ? ref.slice(6) : ref;
+  return layers.some((l) => l.id === id) ? id : null;
+}
+
+// params.layers con claves '@tag' / 'layer:<id>' → { id: override }. Primero se aplican las de tag y
+// encima las de id exacto (lo escrito a mano para una capa concreta gana). Las que no resuelven se descartan.
+export function layerOverridesById(layers, ov) {
+  if (!ov || typeof ov !== 'object') return {};
+  const keys = Object.keys(ov);
+  if (!keys.some((k) => k.startsWith('@') || k.startsWith('layer:'))) return ov;
+  const out = {};
+  for (const k of keys.filter((k) => k.startsWith('@'))) {
+    const id = resolveLayerRef(layers, k);
+    if (id) out[id] = { ...(out[id] || {}), ...ov[k] };
+  }
+  for (const k of keys.filter((k) => !k.startsWith('@'))) {
+    const id = k.startsWith('layer:') ? k.slice(6) : k;
+    out[id] = { ...(out[id] || {}), ...ov[k] };
+  }
+  return out;
 }

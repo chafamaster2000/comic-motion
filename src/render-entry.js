@@ -17,7 +17,7 @@ async function main() {
     duration: player.duration(),
     fps: scene.meta.fps || 24,
     errors: player.errors,
-    seek: (t) => player.seek(t),
+    seek: (t, o) => player.seek(t, o),
     get gpuBackend() {
       return player.gpuBackend;
     },

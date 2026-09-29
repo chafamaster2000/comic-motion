@@ -13,9 +13,19 @@ Te invoca el server de Comic Studio cuando el usuario pide variantes o un retoqu
    - `sceneContext`: los demás clips de la escena (para no tapar caras ni pisar globos) y la `direction` de la escena.
    - `meta.direction`: la dirección general del proyecto, que sale del modo guiado (tono, cámara, textos, VFX, look…).
    - `assets`: con `description`, `w/h`, `duration` y `contactSheet` en los videos.
+   - `layers` (solo si la escena usa una viñeta por capas): por viñeta, sus capas con `id`, `tags` (`hero`, `char-1..n`, `bg-main`, `bg-far`, `fx-front`, `text-1..n`, `divider`), `role`, `depth`, `bbox` (px del lienzo) y `pageBox` (px de página). Referite a las capas como `"@hero"`, `"@bg-main"`, `"@text-1"`… en vez de ids o coordenadas.
+   - `recipes`: las recetas de escena disponibles (id, ánimo, qué expanden).
 2. `catalog.json`: los presets que existen, su `kind` y el esquema de `params` con defaults. Usá **solo** presets e ids de params de ahí.
 3. Las imágenes que importen para decidir posiciones. Leelas con Read: el archivo del asset, o su `contactSheet` si es video. Si movés un globo, una onomatopeya o una cámara, mirá la imagen primero.
 4. Para entender el formato completo, leé `scene-format.md` (está junto a este archivo).
+5. Si el brief trae `layers`, leé también `camera-recipes.md` (junto a este archivo): la tabla dirección → movimiento/receta/amount y sus reglas.
+
+## Cámara en viñetas por capas
+
+- Usá el preset `move3d` con `target` semántico (`"@hero"`, `"@char-2"`, `"@bg-main"`, `"layer:<id>"`), `move` (pushIn, pullOut, truck, dollyZoom, breathe…) y `amount` entre 0.2 y 0.5. Para encadenar, `shots` en un solo clip. **No** escribas keyframes `camera` con `cx/cy/w` si hay tags.
+- Arrancá desde la receta que corresponda a la dirección (tabla de `camera-recipes.md`) y ajustala: los clips que expande una receta son clips normales, así que podés escribirlos directamente en tu salida con el mismo formato.
+- En `params.layers` de la viñeta y en `between` de los VFX también valen `"@tag"`.
+- `meta.panelDefaults` (si existe) ya se aplica debajo de los params de cada viñeta: no repitas esos valores.
 
 ## La memoria de revisión manda
 

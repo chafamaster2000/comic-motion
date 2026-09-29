@@ -3,11 +3,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { openProject, newScene, validate, catalog, SKILL_DIR } from '../src/project.js';
+import { openProject, newScene, validate, catalog, SKILL_DIR, checkGaps } from '../src/project.js';
 import { EASES } from '../src/player/ease.js';
 import { startServer } from '../src/server.js';
 import { renderVideo, snapshots } from '../src/render.js';
-import { ingest, detectPanels, cutout, ingestLayers } from '../src/ingest.js';
+import { ingest, detectPanels, cutout, ingestLayers, retagLayersAsset } from '../src/ingest.js';
+import { listRecipes, applyRecipe } from '../src/recipes/index.js';
+import { hoistPanelDefaults } from '../src/project.js';
 import { activeVariant, isStale, layoutScenes, totalDuration } from '../src/shared/scene.js';
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -41,12 +43,19 @@ const HELP = `comic <comando> <proyecto> [opciones]
                                       por escena con roles, profundidad y clipTo automáticos (--scenes: y una escena por asset)
   panels <dir> <assetId>              detecta viñetas en una página → overlay numerado para revisar
   cutout <dir> <assetId>              recorta el personaje (BiRefNet, JS) → assets/<id>.cutout.png
+  tags <dir> [assetId] [--reset]      alias semánticos de capas (@hero, @bg-main, @text-1…): ver/recalcular
+                                      (conserva los tags editados a mano salvo --reset)
+  recipe <dir> <sceneId> <receta> [--target @hero] [--at s] [--duration s] [--replace-camera] [--activate] [--text T] [--dry]
+                                      expande una receta de escena a clips normales (si la escena está aprobada,
+                                      crea una variante nueva en draft). recipe --list: catálogo
+  defaults <dir> [--hoist]            muestra meta.panelDefaults; --hoist sube los params repetidos en todas las viñetas
   check <dir>                         valida scene.json
+  check <dir> --gaps [fps]            además: huecos de cámara (bordes vacíos, textos cortados, VFX fuera de su viñeta)
   status <dir>                        resumen de revisión: aprobado / rechazado / notas / pedidos
   presets                             catálogo de presets y params (markdown)
   snapshot <dir> --t 0.5,2,3.4 [--scale 0.5] [--scene s2]   cuadros PNG para mirar
   studio <dir> [--port 4777] [--open] [--lan]   levanta el panel (--lan: accesible desde la red local)
-  render <dir> [--quality 1080|4k] [--codec h264|prores] [--fps 24|30|60] [--from s --to s] [--out f.mp4]
+  render <dir> [--quality 1080|4k] [--codec h264|prores] [--fps 24|30|60] [--from s --to s] [--out f.mp4] [--workers auto|1-8]
 
   test de paridad DOM/GPU: node test/gpu-parity.mjs [--webgl] [--keep]
   test de paridad de capas vs el PSD: node test/layers-parity.mjs <scene_layout.json> [--webgl] [--keep]`;
@@ -74,6 +83,10 @@ async function main() {
       }
     }
     console.log('\neases: ' + EASES.join(', ') + ', steps:N, [x1,y1,x2,y2], {type:"spring",stiffness,damping}');
+    return;
+  }
+  if (cmd === 'recipe' && (flags.list || !args.length)) {
+    for (const r of listRecipes()) console.log(`- ${r.id.padEnd(14)} ${r.label} (${r.mood}): ${r.description}`);
     return;
   }
   const dir = args[0];
@@ -115,7 +128,7 @@ async function main() {
     const pad = (s, n) => String(s ?? '').padEnd(n);
     for (const r of res) {
       console.log(`\n✓ ${r.assetId}  layers ${r.asset.w}×${r.asset.h}  ${r.asset.layers.length} capas  preview ${r.asset.file}${r.sceneId ? `  → escena ${r.sceneId}` : ''}`);
-      console.log('  ' + pad('capa', 22) + pad('rol', 11) + pad('depth', 7) + pad('clipTo', 22) + 'por qué');
+      console.log('  ' + pad('capa', 22) + pad('rol', 11) + pad('depth', 7) + pad('clipTo', 22) + pad('tags', 20) + 'por qué');
       for (const d of r.decisions) {
         const why = [d.why];
         if (d.global) why.push('global');
@@ -123,10 +136,59 @@ async function main() {
         if (d.dividerOf) why.push(`pegado a ${d.dividerOf}`);
         if (d.attachedTo) why.push(`adorno de ${d.attachedTo}`);
         if (d.role === 'text') why.push(d.keepOrder ? `orden del PSD (se solapa con ${d.blockedBy.join(', ')})` : 'arriba de todo');
-        console.log('  ' + pad(d.id, 22) + pad(d.role, 11) + pad(d.depth, 7) + pad(d.clipTo || '—', 22) + why.filter(Boolean).join('; '));
+        console.log('  ' + pad(d.id, 22) + pad(d.role, 11) + pad(d.depth, 7) + pad(d.clipTo || '—', 22) + pad((d.tags.map((t) => '@' + t).join(' ') || '—') + (d.tagsKept ? '*' : ''), 20) + why.filter(Boolean).join('; '));
       }
     }
     console.log('\nRevisá roles y clipTo mirando la preview; se corrigen con params.layers de la viñeta (o en el asset).');
+    return;
+  }
+
+  if (cmd === 'tags') {
+    const { scene, rev } = project.read();
+    const ids = args[1] ? [args[1]] : Object.keys(scene.assets).filter((k) => scene.assets[k].type === 'layers');
+    if (!ids.length) die('no hay assets de capas (comic layers)');
+    const pad = (s, n) => String(s ?? '').padEnd(n);
+    for (const id of ids) {
+      const a = scene.assets[id];
+      if (a?.type !== 'layers') die(`${id} no es un asset de capas`);
+      const res = await retagLayersAsset(project, a, { reset: !!flags.reset });
+      console.log(`\n${id}`);
+      console.log('  ' + pad('capa', 22) + pad('rol', 11) + pad('depth', 7) + 'tags');
+      for (const r of res) {
+        const l = a.layers.find((x) => x.id === r.id);
+        console.log('  ' + pad(r.id, 22) + pad(l.role, 11) + pad(l.depth, 7) + (r.tags.map((t) => '@' + t).join(' ') || '—') + (r.kept ? `   (editados a mano; auto: ${r.auto.map((t) => '@' + t).join(' ') || '—'})` : ''));
+      }
+    }
+    project.write(scene, rev);
+    console.log('\nSe usan como "@hero", "@bg-main", "@text-1"… en between, clipTo, params.layers y el target de move3d. Editá `tags` en la capa para corregir (se conservan).');
+    return;
+  }
+
+  if (cmd === 'recipe') {
+    const [, sceneId, name] = args;
+    if (!sceneId || !name) die('uso: comic recipe <dir> <sceneId> <receta> (comic recipe --list)');
+    const { scene, rev } = project.read();
+    const r = applyRecipe(scene, sceneId, name, { target: flags.target, at: flags.at, duration: flags.duration, replaceCamera: !!flags['replace-camera'], activate: !!flags.activate, text: flags.text, direction: flags.direction });
+    const { errors } = validate(scene, project);
+    if (!flags.dry) project.write(scene, rev);
+    console.log(`${flags.dry ? '(dry) ' : '✓ '}${r.summary}`);
+    console.log(r.created ? `  la variante ${r.base} de ${sceneId} está aprobada (o había que sacar clips aprobados): ${flags.dry ? 'crearía' : 'creé'} ${r.variant} (draft, copia de ${r.base} + receta)${r.activated ? ' y la dejé activa' : `; la activa sigue siendo ${scene.scenes.find((s) => s.id === sceneId).active} (verla en el panel o con --activate)`}` : `  agregado a ${sceneId}/${r.variant} (draft)`);
+    if (r.removed.length) console.log(`  cámaras sacadas: ${r.removed.join(', ')}`);
+    for (const c of r.added) console.log(`  + ${c.track}/${c.id}  ${c.preset} @${c.start}s+${c.duration}s  ${JSON.stringify(c.params)}`);
+    if (r.panelVariant) console.log(`  viñeta ${r.panelVariant.clip}: variante ${r.panelVariant.id} con ${JSON.stringify({ ...r.panelVariant.panel, layers: Object.keys(r.panelVariant.layers).length ? r.panelVariant.layers : undefined })}`);
+    for (const n of r.notes) console.log('  ⚠ ' + n);
+    for (const e of errors) console.log('  ✗ ' + e);
+    return;
+  }
+
+  if (cmd === 'defaults') {
+    const { scene, rev } = project.read();
+    if (flags.hoist) {
+      const r = hoistPanelDefaults(scene);
+      project.write(scene, rev);
+      console.log(`✓ subí a meta.panelDefaults: ${JSON.stringify(r.hoisted)}  (${r.variants} variantes de viñeta, ${r.restamped} aprobaciones re-selladas: el render no cambia)`);
+    }
+    console.log('meta.panelDefaults = ' + JSON.stringify(scene.meta.panelDefaults || {}));
     return;
   }
 
@@ -152,7 +214,17 @@ async function main() {
     for (const w of warnings) console.log('⚠ ' + w);
     for (const e of errors) console.log('✗ ' + e);
     if (errors.length) process.exit(1);
-    return console.log(`✓ scene.json válido (${warnings.length} avisos)`);
+    console.log(`✓ scene.json válido (${warnings.length} avisos)`);
+    if (flags.gaps) {
+      // huecos de cámara: muestrea cada escena (4 fps; --gaps 8 para más) sin navegador
+      const fps = flags.gaps !== true && Number(flags.gaps) > 0 ? Number(flags.gaps) : 4;
+      const g = checkGaps(project.read().scene, { fps });
+      for (const w of g.warnings) console.log('⚠ ' + w);
+      for (const l of g.lines) console.log('✗ ' + l);
+      if (g.lines.length) process.exit(1);
+      console.log(`✓ sin huecos de cámara (${fps} fps)`);
+    }
+    return;
   }
 
   if (cmd === 'status') {
@@ -241,16 +313,17 @@ async function main() {
         fps: flags.fps ? +flags.fps : undefined,
         from: flags.from ? +flags.from : 0,
         to: flags.to ? +flags.to : undefined,
+        workers: flags.workers && flags.workers !== 'auto' ? +flags.workers : 'auto',
         onProgress: (p) => {
           if (Date.now() - last > 2000 || p.frame === p.frames) {
             last = Date.now();
-            process.stdout.write(`  cuadro ${p.frame}/${p.frames}  ${p.elapsed.toFixed(0)}s  eta ${p.eta.toFixed(0)}s\n`);
+            process.stdout.write(`  cuadro ${p.frame}/${p.frames}  ${p.elapsed.toFixed(0)}s  eta ${p.eta.toFixed(0)}s${p.workers > 1 ? `  (${p.workers} en paralelo)` : ''}\n`);
           }
         },
       }),
     );
     for (const w of r.warnings) console.log('⚠ ' + w);
-    return console.log(`✓ ${r.outFile}  (${r.frames} cuadros verificados con ffprobe, ${r.seconds.toFixed(1)}s${r.gpuBackend ? ', VFX con ' + r.gpuBackend : ''})`);
+    return console.log(`✓ ${r.outFile}  (${r.frames} cuadros verificados con ffprobe, ${r.seconds.toFixed(1)}s, ${r.workers} en paralelo${r.gpuBackend ? ', VFX con ' + r.gpuBackend : ''})`);
   }
 
   if (cmd === 'studio') {

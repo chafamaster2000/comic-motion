@@ -11,6 +11,7 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation 
   const [quality, setQuality] = useState('1080');
   const [codec, setCodec] = useState('h264');
   const [range, setRange] = useState('all');
+  const [workers, setWorkers] = useState('auto');
   const running = render.status === 'running';
   const pending = scene.scenes.filter((s) => !s.variants.some((v) => v.status === 'approved'));
   const pct = running ? Math.round(((render.frame || 0) / (render.frames || 1)) * 100) : 0;
@@ -60,6 +61,16 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation 
             <span className="dim">{scene.meta.fps || 24} fps · se configura arriba, en la barra del proyecto</span>
           </label>
           <label>
+            <span>En paralelo</span>
+            <div className="seg">
+              {['auto', 1, 2, 3, 4].map((w) => (
+                <button key={w} className={workers === w ? 'on' : ''} onClick={() => setWorkers(w)} disabled={running} title={w === 'auto' ? 'según los núcleos de la máquina (hasta 4)' : `${w} navegador(es) renderizando tramos a la vez`}>
+                  {w === 'auto' ? 'Auto' : w}
+                </button>
+              ))}
+            </div>
+          </label>
+          <label>
             <span>Tramo</span>
             <div className="seg">
               <button className={range === 'all' ? 'on' : ''} onClick={() => setRange('all')} disabled={running}>
@@ -75,13 +86,14 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation 
           <div className="progress">
             <div className="bar" style={{ width: pct + '%' }} />
             <span>
-              cuadro {render.frame}/{render.frames} · faltan ~{Math.round(render.eta || 0)}s
+              cuadro {render.frame}/{render.frames}
+              {render.frames && typeof render.workers === 'number' && render.workers > 1 ? ` · ${render.workers} en paralelo` : ''} · faltan ~{Math.round(render.eta || 0)}s
             </span>
           </div>
         )}
         {render.status === 'done' && (
           <div className="warnbox ok">
-            Listo: <a href={render.url} target="_blank" rel="noreferrer">{render.outFile?.split('/').pop()}</a> ({render.frames} cuadros en {render.seconds?.toFixed(0)}s)
+            Listo: <a href={render.url} target="_blank" rel="noreferrer">{render.outFile?.split('/').pop()}</a> ({render.frames} cuadros en {render.seconds?.toFixed(0)}s{render.workers > 1 ? `, ${render.workers} en paralelo` : ''})
             {render.warnings?.length ? <div className="dim">{render.warnings.join(' · ')}</div> : null}
           </div>
         )}
@@ -95,7 +107,7 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation 
               Cancelar export
             </button>
           ) : (
-            <button className="btn primary" onClick={() => studio.startRender({ quality, codec, ...(range === 'loop' && loop ? { from: loop[0], to: loop[1] } : {}) })}>
+            <button className="btn primary" onClick={() => studio.startRender({ quality, codec, workers, ...(range === 'loop' && loop ? { from: loop[0], to: loop[1] } : {}) })}>
               Exportar
             </button>
           )}

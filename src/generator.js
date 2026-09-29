@@ -7,6 +7,8 @@ import path from 'node:path';
 import { runClaude } from './claude.js';
 import { SKILL_DIR, catalog, validate, mergeGenerated } from './project.js';
 import { findTarget, activeVariant, reviewContext } from './shared/scene.js';
+import { layersSummary } from './recipes/geometry.js';
+import { listRecipes } from './recipes/index.js';
 
 export function createQueue(project, { onChange }) {
   const dir = path.join(project.internal, 'requests');
@@ -173,7 +175,11 @@ export function targetContext(scene, target, fromVariant) {
   if (!holder) return {};
   const from = fromVariant || activeVariant(holder);
   const direction = sceneHolder.direction || undefined;
+  // viñetas por capas de la escena: capas con tags (@hero, @bg-main, @text-1…), rol, depth y cajas (lienzo y página);
+  // y las recetas disponibles. Ver references/camera-recipes.md.
+  const layers = from && (level === 'scene' ? from : sceneVariant) ? layersSummary(scene, level === 'scene' ? from : sceneVariant) : [];
   return {
+    ...(layers.length ? { layers, recipes: listRecipes() } : {}),
     from,
     siblings: reviewContext(holder),
     sceneContext:

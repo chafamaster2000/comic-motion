@@ -10,6 +10,7 @@ meta     { title, width: 1920, height: 1080, fps: 24, background, generatorModel
          direction: decisiones del modo guiado (claves libres, valores en texto, con las palabras del usuario).
          Cada escena puede tener también su propio `direction` (mismo formato) al lado de `variants`.
          Cambiar la dirección no desactualiza aprobaciones: guía las variantes que se generen después.
+         panelDefaults?: { border: 0, shadow: false, crop: [...], autoTiming: false, … } — ver "Params por defecto de las viñetas".
 assets   { <assetId>: Asset }
 scenes   [ Scene ]           ← en orden de reproducción
 ```
@@ -55,6 +56,12 @@ scenes   [ Scene ]           ← en orden de reproducción
 
 - `track` puede ser `camera`, `panel`, `vfx`, `fx`, `bubble` u `ono`. El preset tiene que ser del mismo kind.
 - `start` y `duration` son segundos relativos a la escena.
+
+### Params por defecto de las viñetas (`meta.panelDefaults`)
+
+`meta.panelDefaults` es un objeto con params del preset `panel` que valen para **todas** las viñetas del proyecto (por ejemplo `{ "border": 0, "shadow": false, "crop": [128,128,1920,1080], "autoTiming": false }`). Al construir la escena se mergean **debajo** de los params de cada variante: la variante gana clave por clave (merge superficial: un `layers` en la variante reemplaza entero al de los defaults). `asset` no puede ir ahí (`check` da error) y las claves que no son params de `panel` dan aviso.
+
+Como el merge es en runtime, agregar o cambiar `panelDefaults` **no toca el `approvedHash`** de ninguna variante (el hash es del contenido de la variante). Ojo: cambiar un default sí cambia cómo se ve lo aprobado que no fija ese param, igual que cambiar el motor. `comic defaults <dir> --hoist` sube a `panelDefaults` los params que todas las variantes de viñeta tienen iguales y los saca de las variantes; como el render queda idéntico, re-sella las aprobaciones que estaban al día (las desactualizadas siguen así). Para código que lea params de viñeta fuera del player: `withPanelDefaults(meta, params)` de `src/player/presets.js`.
 
 **Estados:** `draft`, `approved` (una por holder como máximo), `rejected` (con `rejection` obligatorio desde el panel) y `hidden`. `active` es lo que se ve y se exporta. `approvedHash` marca una aprobación como **desactualizada** si después cambió el contenido. Las acciones de revisión se hacen desde el panel o se editan a mano respetando estas reglas. El historial queda en `history.jsonl`.
 
@@ -191,6 +198,24 @@ Copia los PNG a `assets/layers/<escena>/` (las capas de la raíz del PSD, como `
 - `attachedTo`: adorno pegado a un texto. Entra con él.
 - `area`: px de alfa. Sirve para estimar el tiempo de lectura. Si sabés el texto, agregá `text: "…"` o `words: n`.
 
+- `tags` / `tagsAuto`: alias semánticos (ver abajo).
+
+### Tags (alias semánticos de capas)
+
+`comic layers` (y `comic tags <dir> [asset] [--reset]` para recalcular un asset ya ingestado) pone `tags` en cada capa. Se usan en lugar del id como `"@tag"`, o con el id explícito como `"layer:<id>"`, en: claves de `params.layers` de la viñeta, `clipTo` de un override, `between` de los VFX y el `target` (y `shots[].target`) de la cámara `move3d`. Un `@tag` con varias capas resuelve a la de más adelante (z mayor). `comic check` da error si una referencia no resuelve.
+
+| tag | capa |
+|---|---|
+| `hero` | personaje principal: max(área de alfa · (0.75 + 0.5·cercanía) · (1 − 0.6·distancia al centro)); cercanía 0 = el de más atrás … 1 = el de más adelante; distancia del centroide del alfa al centro del lienzo, normalizada a la media diagonal. Gana el más grande/cercano y, a igual tamaño, el más centrado |
+| `char-1..n` | personajes de atrás hacia adelante (depth, luego z) |
+| `bg-main` | el fondo no global con más área de alfa |
+| `bg-far` | el fondo más lejano (global, depth mínima) si es otro |
+| `fx-front` | el fx de más adelante |
+| `text-1..n` | textos en orden de lectura (sin adornos `attachedTo`) |
+| `divider` | los divisores |
+
+Los tags se pueden editar a mano en el asset (`"tags": ["hero", "villano"]`). `tagsAuto` guarda la última propuesta automática: si `tags` difiere, es una edición a mano y se conserva al re-ingestar o recalcular (`--reset` la pisa). Un tag puesto a mano en una capa se saca de la propuesta automática de las demás (poner `@hero` a mano mueve el héroe).
+
 ### Roles automáticos (heurística de `comic layers`)
 
 | rol | por nombre | si no | depth por defecto | comportamiento |
@@ -210,7 +235,7 @@ Siempre se dibuja en modo GPU completo. `rect`, `crop` (px del lienzo), `focus`,
 
 | param | tipo | qué hace |
 |---|---|---|
-| `layers` | `{ [idCapa]: { depth?, role?, hidden?, at?, dur?, enter?, exit?, motion?, clipTo? } }` | overrides por capa. `clipTo: null` explícito = libre |
+| `layers` | `{ [idCapa \| "@tag" \| "layer:id"]: { depth?, role?, hidden?, at?, dur?, enter?, exit?, motion?, clipTo? } }` | overrides por capa (las claves `@tag` se aplican primero y las de id exacto encima). `clipTo: null` explícito = libre; `clipTo` acepta `@tag` |
 | `depthScale` | número (1) | intensidad global del 3D. 0 = todo plano |
 | `orbit` | `{ yaw, pitch, from?: {yaw, pitch}, ease? }` en grados | la cámara recorre un arco alrededor del punto enfocado, de `from` (o 0) a `{yaw, pitch}` a lo largo del clip. El plano focal no se mueve |
 | `dof` | número 0..1 o `{ amount, focus }` (0) | desenfoque por distancia al plano de foco (`focus` en la escala depth, por defecto 1). Los textos nunca se desenfocan. Con `dof > 0` la paridad con el PSD deja de ser exacta |
@@ -251,4 +276,70 @@ Con `layer` a secas:
 - `node test/layers-parity.mjs <scene_layout.json> [--webgl]` renderiza cada escena al tamaño del lienzo (1:1) con la cámara en reposo y la compara contra `previews/SCENE_XX.png`, con la guía incluida, con `autoTiming` al final de la escena y sin guía contra una composición de referencia. Da media, p99 y max por escena, y falla con max > 1/255.
 - Para lograr diferencia 0 las capas se decodifican sin premultiplicar (`createImageBitmap`, `premultiplyAlpha: 'none'`), el shader premultiplica en float y los buffers de la viñeta son de 8 bits. Cada capa se redondea al mezclarse, igual que en Photoshop. Consecuencia: en una viñeta por capas el glow/bloom de los VFX trabaja con 8 bits por canal.
 - Todas las capas se mezclan en modo normal con opacidad 1. `comic layers` avisa si el PSD traía otro modo u opacidad.
-- Los fondos no se agrandan solos (no hay overscan automático). Si un fondo a sangre deja ver su borde al panear, bajá `depthScale`, acercá ese fondo (`depth` más alto) o limitá la cámara.
+- Los fondos no se agrandan solos (no hay overscan automático). Si un fondo a sangre deja ver su borde al panear, bajá `depthScale`, acercá ese fondo (`depth` más alto) o limitá la cámara. `comic check --gaps` encuentra esos instantes y `move3d` se limita solo (ver "Cámara 3D (move3d) y límites").
+
+## Cámara 3D (move3d) y límites
+
+`move3d` (pista `camera`) describe movimientos clásicos de cámara por **intención** (qué, hacia dónde, cuánto) en vez de keyframes en px. Cada movimiento es un cambio sobre centro, distancia y FOV, y devuelve la misma interfaz que las cámaras 2D (`{view, dx, dy, drot, dzoom}`): los globos DOM, la paridad de capas y el pipeline 2D → 3D no cambian. Funciona en viñetas por capas (parallax real) y en viñetas planas (se vuelve un recorrido 2D). Sostiene su vista al terminar el clip, como `camera`.
+
+| param | qué es |
+|---|---|
+| `move` | `pushIn` \| `pullOut` \| `truck` \| `pedestal` \| `dollyZoom` \| `arc` \| `crane` \| `reveal` \| `rackFocus` \| `handheld` \| `breathe` |
+| `target` | `@tag`, `layer:<id>`, `panel:<clipId>`, `region:[x,y,w,h]` (px de página) o `focus` (foco de la viñeta). Vacío = la primera viñeta de la escena |
+| `amount` | 0..1, fracción del recorrido nominal (tabla). **Nunca px**. Si los bordes no dan, se limita y avisa |
+| `direction` | `left`/`right` (truck, arc, reveal), `up`/`down` (pedestal, crane, reveal), `in`/`out` (dollyZoom) |
+| `ease` | curva del tramo (default `easeInOut`) |
+| `zoom` | encuadre base (≥ 1) de los movimientos que lo usan; vacío = el del movimiento |
+| `from`, `to`, `dof` | rackFocus: capas (o depth) de foco inicial y final (default: el fondo → el objetivo) e intensidad del desenfoque |
+| `shots` | encadenado `[{at, dur, move, target, amount, direction, ease, zoom}]`: cada tramo arranca donde terminó el anterior |
+
+| move | amount = 1 | encuadre base |
+|---|---|---|
+| `pushIn` | zoom ×2 hacia el objetivo (queda centrado) | la viñeta |
+| `pullOut` | arranca a zoom ×2 sobre el objetivo y abre hasta la viñeta | — |
+| `truck` / `pedestal` | recorrido de medio ancho / medio alto de vista; el objetivo pasa por el centro a mitad | zoom 1.2 |
+| `dollyZoom` | distancia ×0.4 (`in`, el fondo se aleja) o ×2.5 (`out`, el fondo se viene encima); el plano del objetivo mantiene su tamaño | zoom 1.25 |
+| `arc` / `crane` | órbita de 12° / 10° alrededor del objetivo, que queda centrado | zoom 1.15 |
+| `reveal` | arranca a zoom 1.8 contra el borde opuesto a `direction` y abre hasta el objetivo | — |
+| `rackFocus` | no mueve la cámara: anima el foco del DOF de `from` a `to` | `zoom` o 1 |
+| `handheld` | ruido suave de ±2 % del ancho y ±0.4° (baja frecuencia, con semilla) | zoom 1.06 |
+| `breathe` | zoom lento de +3 % (período 4 s) y deriva mínima | zoom 1.04 |
+
+```json
+{ "id": "cam", "track": "camera", "variants": [ { "id": "v1", "status": "draft", "preset": "move3d", "start": 0, "duration": 6,
+  "params": { "move": "pushIn", "target": "@hero", "amount": 0.5 } } ] }
+```
+
+```json
+"params": { "shots": [
+  { "at": 0, "dur": 2.5, "move": "pullOut", "target": "@hero", "amount": 0.6 },
+  { "at": 2.5, "dur": 1.5, "move": "rackFocus", "from": "@hero", "to": "@bg-main" },
+  { "at": 4, "dur": 2, "move": "handheld", "amount": 0.3 } ] }
+```
+
+**Canales 3D.** Además de la cámara 2D, `move3d` devuelve `dist` (factor de distancia a igual encuadre del plano focal), `orbit` (`[yaw, pitch]` en grados, se suma al `orbit` de la viñeta) y `dof` (`{amount, focus}`, reemplaza al `dof` de la viñeta mientras la cámara lo empuje). El rig no expone el FOV: el dolly zoom se hace con `dist` (`D = D0·s0/s·dist`, equivalente a cambiar la distancia focal) y el zoom 2D se despeja para que el plano del objetivo (a `Zt`) mida lo mismo en pantalla: `r = K·dist / (dist − K·Zt)`, con `r` la escala del plano focal respecto del reposo y `K` la del arranque. La distancia nunca baja de `(0.15 − zmin)·D0`; si el dolly `in` choca con ese límite, se limita `amount`. Para centrar una capa a profundidad `Z` la vista se centra en su punto del mundo `c0 + (p − c0)(1 + Z)` (con órbita, más `tan θ · Z·D0`).
+
+**Límites (estilo "cinematic photos": el render cubre el cuadro en cada cuadro).** Al construir, `move3d` muestrea su recorrido y verifica con `src/player/bounds.js` que:
+- en una viñeta por capas, la unión de los **fondos** visibles (rol `background`, bbox en el plano de cada uno, con su parallax) cubra la parte visible de la caja;
+- si la escena en reposo está cubierta por viñetas (a sangre), la vista no salga de ellas; si no, que no salga de la página.
+
+El muestreo es denso (≤ 30 fps) e incluye los **efectos de cámara de la escena** que se suman encima (`shake`, `dutch`, `dolly` de otros clips), también los que caen después de cada tramo (el siguiente arranca de ahí y move3d sostiene su vista al final). Si no da, primero corre el encuadre hacia el centro de la viñeta (en `pushIn`, `pullOut`, `reveal`; en el resto primero limita `amount`) y después limita `amount`; si ni sin moverse entra (un shake viejo sobre el encuadre de reposo), agranda el encuadre lo mínimo (overscan hasta ×1.5, salvo en `dollyZoom`). **Siempre con aviso** (`ctx.warn`, `player.warnings`, `rt.warnings`/`rt.limits` y `comic check --gaps`): `truck: amount limitado a 0.22 (pedido 1) para no ver bordes`. Las cámaras viejas (`camera`, `dolly`, `shake`…) no se tocan: solo las revisa `check --gaps`.
+
+**`comic check <dir> --gaps [fps]`** muestrea cada escena (4 fps por defecto) con la cámara compuesta (la misma función que el player, sin navegador) y reporta, con tiempos locales a la escena:
+- `s3 t=5.25–6.00s (peor en 5.50s): se ve el borde derecho de <fondo> (−34 px)` (hueco entre los fondos de una viñeta por capas);
+- `se ve fuera de la viñeta <id>` / `fuera de la página` (vista 2D que sale del contenido);
+- textos (rol `text`) cortados por el borde del cuadro o de su viñeta durante ≥ 0.5 s, o que aparecen (`at > 0`) enteros fuera de cuadro; globos DOM cortados;
+- VFX con `region` fuera de su viñeta;
+- los avisos de `move3d`.
+
+Se saltean los tramos de entrada/salida de las viñetas. La cobertura usa el bbox de cada capa (no el alfa): un fondo con transparencias grandes puede dar un falso "cubierto". Sin `--gaps`, `check` no cambia.
+
+## Recetas de escena
+
+`comic recipe <dir> <sceneId> <receta> [--target @tag] [--at s] [--duration s] [--replace-camera] [--activate] [--text T] [--direction left|right] [--dry]` expande una receta a **clips normales y editables** sobre la variante activa de la escena: cámara `move3d` con `@tag`, overrides de capas (en una variante nueva del clip de la viñeta, que queda activa), `shake`/`flash`/`ono`/`speedLines` y VFX. No hay un formato de receta en `scene.json`: después de aplicarla queda JSON común. `comic recipe --list` muestra el catálogo; qué receta usar según la dirección está en `camera-recipes.md`.
+
+- Si la variante activa de la escena está aprobada (o `--replace-camera` tendría que sacar un clip aprobado), crea una variante nueva de escena copiando la activa (`draft`, `parent` = la activa, `instruction: "receta <id>"`) y la aprobada queda intacta; con `--activate` la deja activa.
+- Si no, agrega los clips a la variante activa (ids únicos: `cam`, `cam_2`…).
+- Necesita una viñeta por capas con tags (`comic layers` / `comic tags`).
+
+Recetas (`src/recipes/<id>.js`, funciones puras `expand(ctx) → { summary, clips, layers?, panel?, notes? }`; contrato en `src/recipes/index.js`): `establishing`, `dialogue`, `hero-entrance`, `reveal`, `tension`, `impact`.

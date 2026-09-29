@@ -7,6 +7,7 @@ import { easing, progress, keyframes, mix, clamp } from './ease.js';
 import { mediaLayout, panelView, layerLayout } from './media.js';
 import { VFX } from './vfx/index.js';
 import { resolveLayers, layerState, orbitAt } from './layers.js';
+import { move3d } from './camera3d.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const el = (tag, cls, style) => {
@@ -1012,7 +1013,16 @@ export function defaultsOf(def) {
   return o;
 }
 
-export const BUILTIN = [camera, shake, dutch, dolly, panel, bubble, ono, speedLines, focusLines, flash, vignette, halftone, ink, posterize, paper, chroma, cssFilter, ...transitions, ...VFX];
+// meta.panelDefaults: params por defecto de TODAS las viñetas del proyecto, debajo de los de cada variante
+// (merge superficial: la variante gana clave por clave). Se aplica al construir, así que no toca el
+// contenido ni el approvedHash de las variantes.
+export function withPanelDefaults(meta, params) {
+  const d = meta?.panelDefaults;
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return params || {};
+  return { ...structuredClone(d), ...(params || {}) };
+}
+
+export const BUILTIN = [camera, shake, dutch, dolly, move3d, panel, bubble, ono, speedLines, focusLines, flash, vignette, halftone, ink, posterize, paper, chroma, cssFilter, ...transitions, ...VFX];
 
 {
   const seen = new Set();

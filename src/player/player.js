@@ -1,11 +1,12 @@
 // Player determinístico: render(t) es una función pura del tiempo global.
 // El panel lo usa en vivo (play con rAF) y el exportador lo congela cuadro por cuadro con seek(t).
 import { layoutScenes, activeClips, hashString, mulberry32 } from '../shared/scene.js';
-import { BUILTIN, defaultsOf } from './presets.js';
+import { BUILTIN, defaultsOf, withPanelDefaults } from './presets.js';
 import { easing } from './ease.js';
 import { mix } from 'motion';
 import { createGpuSystem } from './gpu/engine.js';
 import { vfxNeeds } from './vfx/index.js';
+import { cameraResultsAt, composeCamera, holdsView } from './camera3d.js';
 
 const STYLE_ID = 'cm-player-style';
 
@@ -115,6 +116,7 @@ export function createPlayer(root, opts) {
     const layout = layoutScenes(scene);
     const videos = [];
     const errors = [];
+    const warnings = [];
     let uidN = 0;
     const scenes = layout.map((entry, zi) => {
       const v = entry.variant;
@@ -135,7 +137,8 @@ export function createPlayer(root, opts) {
       sceneEl.append(cam, screen);
       frame.append(under, sceneEl, overlay);
 
-      const clips = activeClips(v);
+      // meta.panelDefaults va debajo de los params de cada viñeta (solo en runtime: no toca el hash de aprobación)
+      const clips = activeClips(v).map((c) => (c.clip.track === 'panel' && scene.meta?.panelDefaults ? { ...c, variant: { ...c.variant, params: withPanelDefaults(scene.meta, c.variant.params) } } : c));
       // rects de viñetas para que cámara y globos puedan apuntarles
       const panelRects = {};
       const firstPanel = clips.find((c) => c.clip.track === 'panel')?.clip.id || null;
@@ -159,7 +162,13 @@ export function createPlayer(root, opts) {
           else upgrade(tgt, vfxNeeds(def, variant.params));
         }
       }
-      const sref = { key: entry.scene.id, visible: false };
+      // camDof: algún clip de cámara (move3d rackFocus) empuja el foco del DOF → el rig prepara el desenfoque
+      const camDof = clips.some(({ clip, variant }) => clip.track === 'camera' && presets[variant.preset]?.usesDof?.(variant.params));
+      const sref = { key: entry.scene.id, visible: false, camDof };
+      // viñetas de la escena para las cámaras (move3d: objetivos por capa y límites)
+      const scenePanels = clips.filter(({ clip }) => clip.track === 'panel').map(({ clip, variant }) => ({ id: clip.id, start: variant.start || 0, duration: variant.duration || 0, params: { ...defaultsOf(presets.panel), ...(variant.params || {}) } }));
+      // efectos de cámara de la escena (shake, dutch, dolly): move3d los incluye en su límite; se llenan al final
+      const cameraEffects = [];
       const gpuPanels = {};
       const order = ['panel', 'vfx', 'fx', 'bubble', 'ono', 'camera'];
       const sorted = [...clips].sort((a, b) => order.indexOf(a.clip.track) - order.indexOf(b.clip.track));
@@ -195,6 +204,9 @@ export function createPlayer(root, opts) {
           assetUrl: (a) => fileUrl(a.type === 'video' ? a.proxy || a.file : a.file),
           fileUrl,
           panelRect: (id) => panelRects[id],
+          panels: scenePanels,
+          cameraEffects,
+          warn: (m) => warnings.push(`${entry.scene.id}/${clip.id}: ${m}`),
           preload: (img) => {
             pending.add(img);
             const done = () => pending.delete(img);
@@ -233,9 +245,10 @@ export function createPlayer(root, opts) {
           rec.gpuPanel = gp;
         }
       }
-      return { entry, stage, sceneEl, cam, page, screen, overlay, under, runtimes, zi, sref };
+      for (const r of runtimes) if (r.isCamera && !holdsView(r.def)) cameraEffects.push(r);
+      return { entry, stage, sceneEl, cam, page, screen, overlay, under, runtimes, cams: runtimes.filter((r) => r.isCamera), zi, sref };
     });
-    built = { frame, layout, scenes, videos, errors, gpu };
+    built = { frame, layout, scenes, videos, errors, warnings, gpu };
     if (errors.length) console.warn('[comic]', errors);
   }
 
@@ -269,27 +282,15 @@ export function createPlayer(root, opts) {
       if (!visible) return;
       resetScene(s);
       const local = t - start;
-      let view = { cx: s.stage.w / 2, cy: s.stage.h / 2, w: Math.max(s.stage.w, s.stage.h * (W() / H())), rotate: 0 };
-      let dx = 0;
-      let dy = 0;
-      let drot = 0;
-      let dzoom = 1;
+      // cámara compuesta (camera3d.js, la misma función que usa `comic check --gaps`); los efectos de cámara
+      // terminan con su clip, `camera` y `move3d` sostienen su vista
+      const view0 = { cx: s.stage.w / 2, cy: s.stage.h / 2, w: Math.max(s.stage.w, s.stage.h * (W() / H())), rotate: 0 };
+      const { view, dx, dy, drot, dzoom, dist, orbit, dof } = composeCamera(view0, cameraResultsAt(s.cams, local));
       for (const r of s.runtimes) {
         const cs = r.variant.start || 0;
         const ce = cs + (r.variant.duration || 0);
-        const on = local >= cs && local < ce + (r.isCamera ? 1e9 : 0);
-        if (r.isCamera) {
-          if (local < cs) continue;
-          const lt = Math.min(local - cs, r.variant.duration || 0);
-          const res = r.rt.update ? r.rt.update(lt) || {} : {};
-          if (local >= ce && r.def.id !== 'camera') continue; // efectos de cámara terminan con su clip
-          if (res.view) view = { ...view, ...res.view };
-          dx += res.dx || 0;
-          dy += res.dy || 0;
-          drot += res.drot || 0;
-          dzoom *= res.dzoom || 1;
-          continue;
-        }
+        const on = local >= cs && local < ce;
+        if (r.isCamera) continue;
         if (r.isVfx) {
           // VFX: t local cuantizado si stepFps > 0 (onTwos = 12)
           const sf = +r.variant.params?.stepFps || 0;
@@ -310,6 +311,10 @@ export function createPlayer(root, opts) {
       s.cam.style.transform = `translate(${W() / 2 + dx}px, ${H() / 2 + dy}px) rotate(${rot}deg) scale(${sc}) translate(${-view.cx}px, ${-view.cy}px)`;
       // la misma cámara en números (página → cuadro): de acá las viñetas por capas derivan la cámara 3D
       s.sref.cam = new DOMMatrix().translate(W() / 2 + dx, H() / 2 + dy).rotate(rot).scale(sc).translate(-view.cx, -view.cy);
+      // canales 3D de move3d para el rig de capas: distancia a igual encuadre, órbita extra y foco animado
+      s.sref.dist = dist;
+      s.sref.orbit = orbit;
+      s.sref.dof = dof;
     });
     // transiciones de entrada
     scenes.forEach((s, i) => {
@@ -343,7 +348,9 @@ export function createPlayer(root, opts) {
 
   function videoTime(v, t) {
     const local = t - v.sceneEntry.start - (v.clipStart || 0);
-    return Math.max(0, v.map(Math.max(0, local)));
+    // +2 ms: si el tiempo cae justo en el borde de un cuadro del video, el redondeo puede dejar el decoder
+    // en el cuadro anterior (cuadro repetido). El empujón es mucho menor que un cuadro a 60 fps.
+    return Math.max(0, v.map(Math.max(0, local))) + 0.002;
   }
 
   function syncVideos(t, seeking) {
@@ -375,7 +382,8 @@ export function createPlayer(root, opts) {
   }
 
   // Para exportar: renderiza t y espera a que imágenes, fuentes y videos estén listos.
-  async function seek(t) {
+  // opts.rafs: cuadros de animación a esperar al final (2 por defecto; ver src/render.js)
+  async function seek(t, opts = {}) {
     pause();
     render(t);
     await document.fonts.ready;
@@ -409,7 +417,8 @@ export function createPlayer(root, opts) {
       renderGpu();
       await gpu.finish();
     }
-    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const rafs = opts.rafs ?? 2;
+    for (let i = 0; i < rafs; i++) await new Promise((r) => requestAnimationFrame(r));
   }
 
   function tick() {
@@ -463,6 +472,10 @@ export function createPlayer(root, opts) {
     },
     get errors() {
       return built?.errors || [];
+    },
+    // avisos de los presets al construir (p. ej. move3d: "amount limitado a 0.22")
+    get warnings() {
+      return built?.warnings || [];
     },
     get frameEl() {
       return built?.frame;
