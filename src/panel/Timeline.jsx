@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { activeVariant, activeClips, isStale } from '../shared/scene.js';
 import { trackList, trackLabel, makeClip } from './tracks.js';
+import { layersAssetOf, layerTimeMarks, setOverride, ROLE_LABEL } from './layers.js';
 
 const GUTTER = 118;
 const LANE = 26;
@@ -96,6 +97,21 @@ export function Timeline({ scene, presets, layout, time, fps, duration, seek, ed
           v.duration = snap(d.start + d.dur - ns);
           v.start = ns;
         } else v.duration = Math.max(1 / fps, snap(d.dur + dt));
+      });
+    } else if (d.kind === 'layerAt') {
+      edit((s) => {
+        const sh = s.scenes.find((x) => x.id === d.sceneId);
+        const c = activeVariant(sh).clips.find((x) => x.id === d.clipId);
+        const v = activeVariant(c);
+        const asset = layersAssetOf(s, v.params);
+        const layer = asset?.layers.find((l) => l.id === d.layerId);
+        if (!layer) return;
+        const at = Math.max(0, Math.min(v.duration, snap(d.at + dt)));
+        const layers = setOverride(v.params.layers, layer, 'at', at);
+        const params = { ...v.params };
+        if (layers) params.layers = layers;
+        else delete params.layers;
+        v.params = params;
       });
     } else if (d.kind === 'scene') {
       edit((s) => {
@@ -233,6 +249,7 @@ export function Timeline({ scene, presets, layout, time, fps, duration, seek, ed
                     {clip.label || clip.id}
                     {nVar > 1 && <b className="nv">{nVar}</b>}
                   </span>
+                  {track === 'panel' && <LayerMarks scene={scene} variant={variant} k={k} onDrag={(ev, m) => startDrag(ev, { kind: 'layerAt', sceneId: e.scene.id, clipId: clip.id, layerId: m.id, at: m.at })} />}
                   <div className="grip r" onPointerDown={(ev) => startDrag(ev, { kind: 'clip', mode: 'right', sceneId: e.scene.id, clipId: clip.id, start: variant.start, dur: variant.duration })} />
                 </div>
               );
@@ -243,4 +260,21 @@ export function Timeline({ scene, presets, layout, time, fps, duration, seek, ed
       </div>
     </section>
   );
+}
+
+// Marcas de `at` de las capas de una viñeta de capas (arrastrables, con snap a cuadro).
+function LayerMarks({ scene, variant, k, onDrag }) {
+  const asset = layersAssetOf(scene, variant.params);
+  if (!asset) return null;
+  return layerTimeMarks(asset, variant.params?.layers)
+    .filter((m) => m.at <= variant.duration + 1e-6)
+    .map((m) => (
+      <div
+        key={m.id}
+        className={`layer-mark r-${m.role} ${m.explicit ? '' : 'implicit'}`}
+        style={{ left: m.at * k }}
+        title={`${m.name} · ${ROLE_LABEL[m.role] || m.role} · aparece a ${m.at.toFixed(2)}s${m.explicit ? '' : ' (sin tiempo propio)'} — arrastrá para mover`}
+        onPointerDown={(ev) => onDrag(ev, m)}
+      />
+    ));
 }

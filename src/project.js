@@ -3,10 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { BUILTIN, defaultsOf } from './player/presets.js';
+import { BUILTIN, defaultsOf, ENTERS } from './player/presets.js';
 import { TRACKS, activeVariant, nextVariantId, findTarget, layoutScenes } from './shared/scene.js';
 import { vfxNeeds } from './player/vfx/index.js';
 import { unsupportedGpuFilters } from './player/gpu/filter-support.js';
+import { LAYER_ROLES } from './player/layers.js';
 
 export const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -97,6 +98,7 @@ export function validate(scene, project) {
     else if (project && !fs.existsSync(path.join(project.dir, a.file))) errors.push(`asset ${id}: no existe ${a.file}`);
     if (!a.w || !a.h) errors.push(`asset ${id}: faltan w/h (usá comic ingest)`);
     if (a.type === 'video' && a.proxy && project && !fs.existsSync(path.join(project.dir, a.proxy))) errors.push(`asset ${id}: no existe proxy ${a.proxy}`);
+    if (a.type === 'layers') checkLayersAsset(id, a, project, errors, warnings);
   }
   const sceneIds = new Set();
   for (const s of scene.scenes || []) {
@@ -124,7 +126,7 @@ export function validate(scene, project) {
       for (const c of v.clips || []) {
         const av = activeVariant(c);
         if (!av || av.status === 'hidden') continue;
-        if (c.track === 'panel' && av.params?.gpu) gpuMode[c.id] = 'full';
+        if (c.track === 'panel' && (av.params?.gpu || scene.assets?.[av.params?.asset]?.type === 'layers')) gpuMode[c.id] = 'full';
         if (c.track !== 'vfx') continue;
         const tgt = av.params?.target || firstPanel;
         const w3 = `${w2}/${c.id}/${av.id}`;
@@ -137,6 +139,18 @@ export function validate(scene, project) {
         const an = av.params?.anchor;
         if (an != null && !(Array.isArray(an) && an.length === 2 && an.every((x) => typeof x === 'number'))) errors.push(`${w3}: anchor tiene que ser [x, y] en px de página`);
         if (av.params?.layer && !['back', 'mid', 'front'].includes(av.params.layer)) errors.push(`${w3}: layer inválido ${av.params.layer} (back|mid|front)`);
+        // between / z: solo en viñetas por capas
+        const btw = av.params?.between;
+        const tAsset = tgt && panelOf[tgt] ? scene.assets?.[panelOf[tgt].params?.asset] : null;
+        if (btw != null || av.params?.z != null) {
+          if (tAsset?.type !== 'layers') warnings.push(`${w3}: between/z solo sirven con una viñeta por capas (se usa layer)`);
+          else if (btw != null) {
+            const ids = new Set(tAsset.layers.map((l) => l.id));
+            if (!Array.isArray(btw) || btw.length !== 2) errors.push(`${w3}: between tiene que ser [idAtrás, idAdelante]`);
+            else for (const b of btw) if (!ids.has(b)) errors.push(`${w3}: between menciona la capa "${b}", que no está en ${panelOf[tgt].params.asset}`);
+          }
+          if (av.params?.z != null && typeof av.params.z !== 'number') errors.push(`${w3}: z tiene que ser un número (escala depth 0..2)`);
+        }
       }
       for (const [pid, mode] of Object.entries(gpuMode)) {
         if (mode !== 'full') continue;
@@ -170,7 +184,9 @@ export function validate(scene, project) {
           const a = cv.params?.asset;
           if (a && !assetIds.has(a)) errors.push(`${w4}: asset desconocido ${a}`);
           if (cv.preset === 'panel' && !a) warnings.push(`${w4}: viñeta sin asset`);
-          if (cv.preset === 'panel' && cv.params?.depth && a && !scene.assets[a]?.cutout) warnings.push(`${w4}: depth>0 pero el asset ${a} no tiene cutout (comic cutout)`);
+          if (cv.preset === 'panel' && cv.params?.depth && a && scene.assets[a]?.type !== 'layers' && !scene.assets[a]?.cutout) warnings.push(`${w4}: depth>0 pero el asset ${a} no tiene cutout (comic cutout)`);
+          if (cv.preset === 'panel' && a && scene.assets[a]?.type === 'layers') checkLayerOverrides(w4, scene.assets[a], cv.params, errors, warnings);
+          else if (cv.preset === 'panel' && cv.params?.layers) warnings.push(`${w4}: params.layers solo sirve con un asset type 'layers'`);
           for (const f of cv.params?.filters || []) if (!ids.has(f.preset) && !custom.has(f.preset)) errors.push(`${w4}: filtro desconocido ${f.preset}`);
           if (cv.preset === 'camera') for (const k of cv.params?.keys || []) if (k.panel && !(v.clips || []).some((x) => x.id === k.panel)) errors.push(`${w4}: la cámara apunta a la viñeta ${k.panel} que no existe`);
         }
@@ -179,6 +195,61 @@ export function validate(scene, project) {
   }
   if ((scene.scenes || []).length && !layoutScenes(scene).length) errors.push('ninguna escena tiene variante activa');
   return { errors, warnings };
+}
+
+// ---------- viñetas por capas ----------
+function checkLayersAsset(id, a, project, errors, warnings) {
+  if (!Array.isArray(a.layers) || !a.layers.length) return errors.push(`asset ${id}: type 'layers' sin layers`);
+  const ids = new Map();
+  for (const l of a.layers) {
+    const w = `asset ${id}/capa ${l.id}`;
+    if (!l.id) errors.push(`asset ${id}: capa sin id`);
+    if (ids.has(l.id)) errors.push(`${w}: id repetido`);
+    ids.set(l.id, l);
+    if (!l.file) errors.push(`${w}: falta file`);
+    else if (project && !fs.existsSync(path.join(project.dir, l.file))) errors.push(`${w}: no existe ${l.file}`);
+    for (const k of ['x', 'y', 'w', 'h']) if (typeof l[k] !== 'number') errors.push(`${w}: falta ${k} (px del lienzo)`);
+    if (!(l.w > 0 && l.h > 0)) errors.push(`${w}: w/h inválidos`);
+    if (l.role && !LAYER_ROLES.includes(l.role)) errors.push(`${w}: rol inválido ${l.role} (${LAYER_ROLES.join('|')})`);
+    if (l.depth != null && typeof l.depth !== 'number') errors.push(`${w}: depth tiene que ser un número (0..2)`);
+    if (l.clipMask?.file && project && !fs.existsSync(path.join(project.dir, l.clipMask.file))) errors.push(`${w}: no existe la máscara ${l.clipMask.file}`);
+  }
+  for (const l of a.layers) {
+    if (!l.clipTo) continue;
+    const bg = ids.get(l.clipTo);
+    if (!bg) errors.push(`asset ${id}/capa ${l.id}: clipTo "${l.clipTo}" no existe`);
+    else if (bg === l) errors.push(`asset ${id}/capa ${l.id}: clipTo a sí misma`);
+    else if (bg.role !== 'background') warnings.push(`asset ${id}/capa ${l.id}: clipTo "${l.clipTo}" no es un fondo (role ${bg.role})`);
+  }
+}
+
+function checkLayerOverrides(where, asset, params, errors, warnings) {
+  const ids = new Map(asset.layers.map((l) => [l.id, l]));
+  const ov = params?.layers;
+  if (ov != null && (typeof ov !== 'object' || Array.isArray(ov))) return errors.push(`${where}: params.layers tiene que ser { idCapa: { … } }`);
+  for (const [lid, o] of Object.entries(ov || {})) {
+    const w = `${where}/capa ${lid}`;
+    if (!ids.has(lid)) {
+      warnings.push(`${w}: la capa no existe en el asset (override ignorado)`);
+      continue;
+    }
+    if (o.role != null && !LAYER_ROLES.includes(o.role)) errors.push(`${w}: rol inválido ${o.role} (${LAYER_ROLES.join('|')})`);
+    if (o.depth != null && typeof o.depth !== 'number') errors.push(`${w}: depth tiene que ser un número (0..2)`);
+    if (o.clipTo) {
+      if (!ids.has(o.clipTo)) errors.push(`${w}: clipTo "${o.clipTo}" no existe`);
+      else if (o.clipTo === lid) errors.push(`${w}: clipTo a sí misma`);
+    }
+    for (const k of ['at', 'dur']) if (o[k] != null && !(typeof o[k] === 'number' && o[k] >= 0)) errors.push(`${w}: ${k} tiene que ser segundos >= 0`);
+    for (const k of ['enter', 'exit']) {
+      const sp = o[k];
+      const preset = typeof sp === 'string' ? sp : sp?.preset;
+      if (sp != null && !ENTERS.includes(preset)) errors.push(`${w}: ${k} desconocido ${preset} (${ENTERS.join('|')})`);
+    }
+  }
+  const o = params?.orbit;
+  if (o != null && (typeof o !== 'object' || Array.isArray(o))) errors.push(`${where}: orbit tiene que ser { yaw, pitch } en grados`);
+  const d = params?.dof;
+  if (d != null && typeof d !== 'number' && typeof d !== 'object') errors.push(`${where}: dof tiene que ser un número 0..1 o { amount, focus }`);
 }
 
 function checkHolderStatus(h, where, errors) {

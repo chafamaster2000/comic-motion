@@ -155,3 +155,100 @@ export default {
 | `fx` | helpers TSL: `hash(uint)` (PCG entero), `hash2(a,b)`, `noise(vec2\|vec3)` (Perlin), `ballistic(p0, v0, g, k, τ) → vec4(pos, vel)` (gravedad + drag lineal, forma cerrada), `pulse(x,a,b)`, `heat(u) → vec3` (temperatura de color) |
 
 Reglas: nada de `Math.random`, `Date.now` ni `fract(sin())`; los aleatorios salen de la semilla (`r0/r1`, `randoms`, `fx.hash`). Todo en función de `t`: `update(t)` puede tocar uniforms, nunca acumular estado.
+
+## Viñetas por capas
+
+Para arte que viene **por capas** de un PSD (PNGs RGBA 1:1 + `scene_layout.json` con `canvas`, árbol de capas con `file`, `z_index`, `position`, `size` y `scenes[i].draw_order`). Cada capa es un **plano 3D real** (three.js, WebGPU o WebGL2) a una distancia propia, visto por una cámara en perspectiva. En reposo la recomposición es la del PSD, píxel a píxel. Cuando la cámara se mueve hay parallax real: el fondo se mueve menos que los personajes y los textos quedan fijos.
+
+```
+comic layers <dir> <scene_layout.json> [--exclude margins,…] [--scenes]
+```
+
+Copia los PNG a `assets/layers/<escena>/` (las capas de la raíz del PSD, como `black_bkg`, van a `assets/layers/_global/`). Crea un asset por escena del layout, compone `_preview.png` sin guías y deja las máscaras `*.clip.png`. Imprime la tabla de decisiones: rol, depth, clipTo y el porqué de cada uno. Con `--scenes` también agrega una escena por asset: la viñeta ocupa la página, sin borde ni sombra, y la duración sale de los textos. `--exclude` deja afuera las capas cuyo id o nombre contiene alguno de los textos. Hace falta un `comic init` antes.
+
+**Revisión (vos sos el VLM):** mirá la preview y la tabla, y corregí con `params.layers` de la viñeta lo que la heurística erró (o editá el asset).
+
+### Asset `type: 'layers'`
+
+```json
+{ "type": "layers", "w": 2176, "h": 1336, "file": "assets/layers/scene_01/_preview.png",
+  "layers": [
+    { "id": "black_bkg", "name": "black_bkg", "file": "assets/layers/_global/black_bkg.png", "x": -1107, "y": -521, "w": 4391, "h": 2516, "z": 1, "role": "background", "depth": 0, "global": true },
+    { "id": "hero", "name": "hero", "file": "assets/layers/scene_01/hero.png", "x": 861, "y": 35, "w": 1193, "h": 667, "z": 4, "role": "character", "depth": 0.875,
+      "clipTo": "bkg_top", "clipMask": { "for": "bkg_top", "file": "assets/layers/scene_01/hero.clip.png", "x": 0, "y": 4, "w": 2139, "h": 743 } },
+    { "id": "dialog_01", "name": "dialog 01", "file": "…", "x": 724, "y": 431, "w": 756, "h": 203, "z": 9, "role": "text", "depth": 1, "area": 98000 },
+    { "id": "ornament", "role": "text", "attachedTo": "caption_box", "…": "…" },
+    { "id": "sfx_text", "role": "text", "keepOrder": true, "…": "…" },
+    { "id": "margins", "role": "guide", "depth": 0, "global": true, "…": "…" } ],
+  "source": { "layout": "/ruta/scene_layout.json", "scene": "PAGE_01", "psd": "x.psd", "preview": "/ruta/previews/PAGE_01.png" } }
+```
+
+- `x, y, w, h`: px del lienzo (esquina superior izquierda, pueden ser negativos). `z`: el `z_index` del PSD, que define el orden de dibujo.
+- `role`: `background` | `character` | `text` | `fx` | `divider` | `guide`.
+- `depth`: escala 0..2, **más alto = más cerca**. 0 es el fondo lejano, 1 el plano focal (la página) y 2 muy cerca. La distancia física al plano focal es `Z = (1 − depth) · 0.6 · depthScale · D0`, con `D0` la distancia de la cámara en reposo.
+- `clipTo`: id del fondo contra el que el personaje está cortado. `clipMask` es la ventana precalculada (ver abajo).
+- `keepOrder`: el texto no sube arriba de todo porque en el PSD se solapa con algo que va encima.
+- `attachedTo`: adorno pegado a un texto. Entra con él.
+- `area`: px de alfa. Sirve para estimar el tiempo de lectura. Si sabés el texto, agregá `text: "…"` o `words: n`.
+
+### Roles automáticos (heurística de `comic layers`)
+
+| rol | por nombre | si no | depth por defecto | comportamiento |
+|---|---|---|---|---|
+| `background` | bkg, background, fondo | cubre >35 % del lienzo con >80 % de alfa | 0 (global) / 0.4 | lejos: se mueve menos |
+| `character` | (el resto) | | 0.75 → 1 según el orden (el de más arriba = 1) | medio; puede tener `clipTo` |
+| `text` | dialog, rhyme, snif, text, bubble, huh, caption… | adorno con ≥70 % de su alfa sobre un texto | 1 (ignorada) | **fijo en el plano focal**, sin parallax ni DOF, arriba de todo (salvo `keepOrder`) |
+| `fx` | lines, vertigo, speed | | 1.15 | al frente |
+| `divider` | div, divider, border, gutter | | la del fondo que más toca | pegado a su viñeta |
+| `guide` | margins, guide | | — | no se dibuja nunca (para verla, cambiale el rol con un override) |
+
+**clipTo (personajes cortados por el borde de su viñeta).** Por cada personaje y cada fondo de la escena se cuentan los píxeles del contorno alfa que caen sobre el borde del fondo (±2 px), pegados a él por dentro (≤14 px) o escondidos bajo un divisor. Con ≥500 px, o ≥120 px sobre el borde con ≥5 % del contorno, queda `clipTo`. Si no, queda libre (break-out). La ventana (`clipMask`, en el plano del fondo) es el alfa del fondo más los divisores, más lo que el personaje ya dejaba asomar a propósito, engordado 40 px (la cabeza que sobresale, un hombro fuera del cuadro). Así el parallax nunca deja ver un corte, pero tampoco se come los break-outs. En el render, cada fragmento del personaje tira un rayo desde la cámara hasta el plano del fondo y se multiplica por `ventana(rayo) / ventana(reposo)`. En reposo ese cociente da exactamente 1 y la paridad se mantiene. Lo que en reposo ya caía fuera de la ventana queda libre. Si un override apunta `clipTo` a otro fondo, se usa el alfa de ese fondo (sin el agregado de los break-outs).
+
+### Params de la viñeta (preset `panel` con asset de capas)
+
+Siempre se dibuja en modo GPU completo. `rect`, `crop` (px del lienzo), `focus`, `kenBurns`, `border`, `radius`, `tilt`, `shadow`, `enter`/`exit` de la caja y `filters` funcionan igual que siempre. Nuevos:
+
+| param | tipo | qué hace |
+|---|---|---|
+| `layers` | `{ [idCapa]: { depth?, role?, hidden?, at?, dur?, enter?, exit?, motion?, clipTo? } }` | overrides por capa. `clipTo: null` explícito = libre |
+| `depthScale` | número (1) | intensidad global del 3D. 0 = todo plano |
+| `orbit` | `{ yaw, pitch, from?: {yaw, pitch}, ease? }` en grados | la cámara recorre un arco alrededor del punto enfocado, de `from` (o 0) a `{yaw, pitch}` a lo largo del clip. El plano focal no se mueve |
+| `dof` | número 0..1 o `{ amount, focus }` (0) | desenfoque por distancia al plano de foco (`focus` en la escala depth, por defecto 1). Los textos nunca se desenfocan. Con `dof > 0` la paridad con el PSD deja de ser exacta |
+| `autoTiming` | bool (true) | tiempos automáticos: los textos se escalonan en orden de lectura. `false` = todo visible desde el inicio |
+
+**Tiempos por capa**, en segundos locales al clip de la viñeta:
+- `at` es cuándo aparece y `dur` cuánto dura (por defecto hasta el fin de la viñeta).
+- `enter` y `exit` son los mismos ENTERS de la viñeta (`pop`, `slam`, `slideLeft`, `fade`, `wipeRight`…), como `{preset, duration?, ease?}` o como string. Se aplican alrededor del centro de la capa.
+- `motion: { dx, dy, scale, rotate, ease }` es un empujón o deriva a lo largo del `dur`: px del lienzo, factor de escala y grados.
+
+Con `autoTiming`, cada texto sin `at` aparece en orden de lectura (renglones de arriba a abajo, izquierda a derecha) con `pop` de 0.35 s. El primero entra a los 0.5 s y los siguientes cuando termina el tiempo de lectura del anterior: 0.4 s + 0.25 s por palabra, con las palabras sacadas de `text`, `words` o el área de alfa (~7000 px² por palabra), o 0.6 s si no hay datos. Si no entran, se comprimen hasta el 70 % de la viñeta. Personajes, fondos y fx entran con la viñeta.
+
+### Cámara 2D → cámara 3D
+
+Los clips de cámara (`camera`, `dolly`, `shake`, `dutch`) y el `kenBurns` significan lo mismo que en una viñeta normal. La cámara 2D sigue moviendo el DOM: la caja, los globos y las onomatopeyas quedan alineados a coordenadas de página. Three **deriva de ella la cámara 3D**:
+- El punto del lienzo que cae en el centro del cuadro es el eje óptico.
+- El zoom se vuelve distancia: `D = D0 · s0/s` (dolly real).
+- El paneo y la sacudida corren la cámara en x/y. `dutch` es un giro en el plano.
+
+Proyectar desde ese centro sobre el plano focal y aplicar después la transformación 2D equivale exactamente a una cámara estenopeica paralela al plano. Por eso el plano focal (textos, globos DOM) queda idéntico a la cámara 2D y el resto gana parallax. El **reposo** es la cámara que encuadra la viñeta entera sin ken burns; en una viñeta que ocupa la página es la vista por defecto de la escena. La entrada/salida y el `tilt` de la caja no mueven la cámara 3D, porque son de la tarjeta, no del ojo. Para que las capas cercanas no crucen la cámara, la distancia no baja de `(0.15 + max(−Z)) · D0`.
+
+### VFX entre capas
+
+En una viñeta por capas, los VFX aceptan además de `layer` (back/mid/front/screen):
+- `between: [idAtrás, idAdelante]`: se dibujan entre esas dos capas, a la profundidad media.
+- `z`: un número en la escala depth; se ubican en el orden según esa profundidad.
+
+Con `layer` a secas:
+- `back` va delante del fondo más lejano.
+- `mid` va entre el último fondo y el primer personaje.
+- `front` va delante de todo, textos incluidos.
+- `screen` va encima, sin parallax.
+
+`anchor`, `region` y `ctx.gpu.toBase` siguen en px de página. `toBase` lleva al plano del fondo principal de la viñeta.
+
+### Paridad y límites
+
+- `node test/layers-parity.mjs <scene_layout.json> [--webgl]` renderiza cada escena al tamaño del lienzo (1:1) con la cámara en reposo y la compara contra `previews/SCENE_XX.png`, con la guía incluida, con `autoTiming` al final de la escena y sin guía contra una composición de referencia. Da media, p99 y max por escena, y falla con max > 1/255.
+- Para lograr diferencia 0 las capas se decodifican sin premultiplicar (`createImageBitmap`, `premultiplyAlpha: 'none'`), el shader premultiplica en float y los buffers de la viñeta son de 8 bits. Cada capa se redondea al mezclarse, igual que en Photoshop. Consecuencia: en una viñeta por capas el glow/bloom de los VFX trabaja con 8 bits por canal.
+- Todas las capas se mezclan en modo normal con opacidad 1. `comic layers` avisa si el PSD traía otro modo u opacidad.
+- Los fondos no se agrandan solos (no hay overscan automático). Si un fondo a sangre deja ver su borde al panear, bajá `depthScale`, acercá ese fondo (`depth` más alto) o limitá la cámara.

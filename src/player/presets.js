@@ -6,6 +6,7 @@
 import { easing, progress, keyframes, mix, clamp } from './ease.js';
 import { mediaLayout, panelView, layerLayout } from './media.js';
 import { VFX } from './vfx/index.js';
+import { resolveLayers, layerState, orbitAt } from './layers.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const el = (tag, cls, style) => {
@@ -364,6 +365,12 @@ const panel = {
     { key: 'rate', label: 'Video: velocidad', type: 'number', min: 0.1, max: 4, step: 0.05, default: 1 },
     { key: 'loop', label: 'Video: loop', type: 'bool', default: false },
     { key: 'gpu', label: 'Dibujar con GPU (three) aunque no tenga VFX', type: 'bool', default: false },
+    // viñeta por capas (asset type 'layers'): siempre GPU completa, planos 3D en perspectiva
+    { key: 'layers', label: 'Capas: overrides por id {depth, role, hidden, at, dur, enter, exit, motion, clipTo}', type: 'layers', default: null },
+    { key: 'depthScale', label: 'Capas: intensidad del 3D (0 = plano)', type: 'number', min: 0, max: 3, step: 0.05, default: 1 },
+    { key: 'orbit', label: 'Capas: órbita de cámara {yaw, pitch} (°, de 0 a eso a lo largo del clip; from, ease)', type: 'orbit', default: null },
+    { key: 'dof', label: 'Capas: desenfoque por distancia (0..1, o {amount, focus})', type: 'number', min: 0, max: 1, step: 0.01, default: 0 },
+    { key: 'autoTiming', label: 'Capas: textos escalonados en orden de lectura (false = todo desde el inicio)', type: 'bool', default: true },
   ],
   build(ctx) {
     const p = ctx.params;
@@ -412,7 +419,24 @@ const panel = {
       }
       return m;
     };
-    if (!asset) {
+    let lx = null;
+    if (asset?.type === 'layers') {
+      // viñeta por capas: la dibuja la GPU (gpu/layers.js). La preview compuesta queda como respaldo DOM.
+      const base = makeMedia(ctx.fileUrl(asset.file));
+      media.append(base);
+      layers.push({ img: base, depth: 0, kind: 'base', src: base.src });
+      const focus = p.focus || asset.focus || [0.5, 0.5];
+      lx = {
+        resolved: resolveLayers(asset, p, ctx.duration),
+        params: p,
+        rect,
+        url: ctx.fileUrl,
+        layout0: mediaLayout(asset, p.crop, innerW, innerH, 1, focus[0], focus[1]),
+        layout: null,
+        states: [],
+        orbit: [0, 0],
+      };
+    } else if (!asset) {
       media.append(el('div', null, { position: 'absolute', inset: 0, background: 'repeating-linear-gradient(45deg,#eee 0 20px,#ddd 20px 40px)' }));
     } else {
       // con profundidad y fondo rellenado, el fondo va sin personajes: no quedan fantasmas
@@ -475,13 +499,22 @@ const panel = {
       crop: p.crop || null,
       pixelated: !!p.pixelated,
       view: null,
+      layersMode: !!lx,
+      lx,
     };
     return {
       gpu,
       update(t) {
         const view = panelView(p, asset, ctx.duration, t);
         gpu.view = view;
-        if (asset) for (const l of layers) applyLayout(l.img, (l.layout = layerLayout(asset, p.crop, innerW, innerH, view, l.depth)));
+        if (lx) {
+          // capas: layout del plano focal (cover + foco + ken burns), estado de cada capa y órbita
+          const L = layerLayout(asset, p.crop, innerW, innerH, { ...view, dp: 0 }, 0);
+          applyLayout(layers[0].img, L);
+          lx.layout = L;
+          lx.states = lx.resolved.map((r) => layerState(r, t, ctx.duration));
+          lx.orbit = orbitAt(p.orbit, t, ctx.duration);
+        } else if (asset) for (const l of layers) applyLayout(l.img, (l.layout = layerLayout(asset, p.crop, innerW, innerH, view, l.depth)));
         const io = inOut(t, ctx.duration, p.enter, p.exit);
         box.style.opacity = io.opacity;
         box.style.transform = `rotate(${p.tilt || 0}deg)` + io.transform;

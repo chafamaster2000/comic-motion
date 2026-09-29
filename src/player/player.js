@@ -150,6 +150,8 @@ export function createPlayer(root, opts) {
       };
       for (const { clip, variant } of clips) {
         if (clip.track === 'panel' && variant.params?.gpu) upgrade(clip.id, 'full');
+        // viñeta por capas: siempre la dibuja three entera (planos 3D)
+        if (clip.track === 'panel' && scene.assets?.[variant.params?.asset]?.type === 'layers') upgrade(clip.id, 'full');
         if (clip.track === 'vfx') {
           const def = presets[variant.preset];
           const tgt = variant.params?.target || firstPanel;
@@ -304,7 +306,10 @@ export function createPlayer(root, opts) {
         if (on && r.rt.update) r.rt.update(local - cs);
       }
       const sc = (W() / view.w) * dzoom;
-      s.cam.style.transform = `translate(${W() / 2 + dx}px, ${H() / 2 + dy}px) rotate(${(view.rotate || 0) + drot}deg) scale(${sc}) translate(${-view.cx}px, ${-view.cy}px)`;
+      const rot = (view.rotate || 0) + drot;
+      s.cam.style.transform = `translate(${W() / 2 + dx}px, ${H() / 2 + dy}px) rotate(${rot}deg) scale(${sc}) translate(${-view.cx}px, ${-view.cy}px)`;
+      // la misma cámara en números (página → cuadro): de acá las viñetas por capas derivan la cámara 3D
+      s.sref.cam = new DOMMatrix().translate(W() / 2 + dx, H() / 2 + dy).rotate(rot).scale(sc).translate(-view.cx, -view.cy);
     });
     // transiciones de entrada
     scenes.forEach((s, i) => {

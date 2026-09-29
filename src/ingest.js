@@ -5,6 +5,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import sharp from 'sharp';
+import { roleFromName, ROLE_DEPTH, GLOBAL_BG_DEPTH, CHARACTER_DEPTH_RANGE, resolveLayers, wordsOf } from './player/layers.js';
 
 const IMG = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif', '.tif', '.tiff'];
 const VID = ['.mp4', '.mov', '.webm', '.mkv', '.m4v', '.avi'];
@@ -288,4 +289,321 @@ function boxBlur(src, w, h, r, passes) {
     }
   }
   return a;
+}
+
+// ---------- viñetas por capas (PNGs + scene_layout.json exportados de un PSD) ----------
+// Una escena del layout → un asset { type: 'layers', w, h, file (preview compuesta), layers: [...] } con roles,
+// profundidad, clipTo (personajes cortados por el borde de su viñeta) y orden automáticos.
+// Devuelve las decisiones para imprimir la tabla. Ver references/scene-format.md, "Viñetas por capas".
+
+// alfa de una capa volcado a un buffer del tamaño del lienzo (lo que cae fuera del lienzo se descarta)
+async function canvasAlpha(file, x, y, W, H) {
+  const { data, info } = await sharp(file).ensureAlpha().extractChannel(3).raw().toBuffer({ resolveWithObject: true });
+  const out = new Uint8Array(W * H);
+  const x0 = Math.max(0, x);
+  const y0 = Math.max(0, y);
+  const x1 = Math.min(W, x + info.width);
+  const y1 = Math.min(H, y + info.height);
+  for (let yy = y0; yy < y1; yy++) {
+    const src = (yy - y) * info.width + (x0 - x);
+    out.set(data.subarray(src, src + (x1 - x0)), yy * W + x0);
+  }
+  return out;
+}
+
+// borde: píxeles >= thr con algún vecino (4) < thr; el borde del lienzo no cuenta como borde
+function edgeMap(A, W, H, thr = 128) {
+  const E = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      if (A[i] < thr) continue;
+      if ((x > 0 && A[i - 1] < thr) || (x < W - 1 && A[i + 1] < thr) || (y > 0 && A[i - W] < thr) || (y < H - 1 && A[i + W] < thr)) E[i] = 1;
+    }
+  return E;
+}
+
+// dilatación binaria con un cuadrado de lado 2r+1 (dos pasadas con conteo corrido)
+function dilate(B, W, H, r) {
+  if (r <= 0) return B;
+  const tmp = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    let c = 0;
+    const row = y * W;
+    for (let x = 0; x < Math.min(W, r); x++) c += B[row + x];
+    for (let x = 0; x < W; x++) {
+      if (x + r < W) c += B[row + x + r];
+      if (x - r - 1 >= 0) c -= B[row + x - r - 1];
+      tmp[row + x] = c > 0 ? 1 : 0;
+    }
+  }
+  const out = new Uint8Array(W * H);
+  for (let x = 0; x < W; x++) {
+    let c = 0;
+    for (let y = 0; y < Math.min(H, r); y++) c += tmp[y * W + x];
+    for (let y = 0; y < H; y++) {
+      if (y + r < H) c += tmp[(y + r) * W + x];
+      if (y - r - 1 >= 0) c -= tmp[(y - r - 1) * W + x];
+      out[y * W + x] = c > 0 ? 1 : 0;
+    }
+  }
+  return out;
+}
+const erode = (B, W, H, r) => {
+  const inv = new Uint8Array(B.length);
+  for (let i = 0; i < B.length; i++) inv[i] = B[i] ? 0 : 1;
+  const d = dilate(inv, W, H, r);
+  for (let i = 0; i < d.length; i++) d[i] = d[i] ? 0 : 1;
+  return d;
+};
+
+export async function ingestLayers(project, scene, layoutFile, { exclude = [], makeScenes = false, log = console.log } = {}) {
+  const srcDir = path.dirname(path.resolve(layoutFile));
+  const doc = JSON.parse(fs.readFileSync(layoutFile, 'utf8'));
+  const W = doc.canvas.width;
+  const H = doc.canvas.height;
+  const byFile = {};
+  const walk = (nodes, group) => {
+    for (const n of nodes) {
+      if (n.children) walk(n.children, n.id || n.name);
+      else if (n.file) byFile[n.file] = { ...n, group };
+    }
+  };
+  walk(doc.layers || [], null);
+  const excluded = (n) => exclude.some((e) => e && (n.id.toLowerCase().includes(e.toLowerCase()) || String(n.name).toLowerCase().includes(e.toLowerCase())));
+  const results = [];
+  for (const sc of doc.scenes || []) {
+    const assetId = slug(sc.scene);
+    const outDir = path.join(project.dir, 'assets', 'layers', assetId);
+    const globDir = path.join(project.dir, 'assets', 'layers', '_global');
+    fs.mkdirSync(outDir, { recursive: true });
+    const L = [];
+    for (const f of sc.draw_order) {
+      const n = byFile[f];
+      if (!n) throw new Error(`draw_order menciona ${f}, que no está en el árbol de capas`);
+      if (excluded(n)) continue;
+      const src = path.join(srcDir, f);
+      if (!fs.existsSync(src)) throw new Error(`no existe ${src}`);
+      const dest = path.join(n.group ? outDir : globDir, path.basename(f));
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+      if (n.opacity != null && n.opacity !== 1) log(`⚠ ${n.id}: opacidad ${n.opacity} (se ignora: el motor dibuja normal, opacidad 1)`);
+      if (n.blend_mode && n.blend_mode !== 'normal') log(`⚠ ${n.id}: modo ${n.blend_mode} (se dibuja normal)`);
+      L.push({ id: n.id, name: n.name, file: path.relative(project.dir, dest), src, x: n.position.x, y: n.position.y, w: n.size.w, h: n.size.h, z: n.z_index, global: !n.group });
+    }
+    // alfas en coords del lienzo
+    for (const l of L) {
+      l.A = await canvasAlpha(l.src, l.x, l.y, W, H);
+      let area = 0;
+      for (let i = 0; i < l.A.length; i++) if (l.A[i] >= 16) area++;
+      l.area = area;
+      const bx = Math.max(0, Math.min(W, l.x + l.w) - Math.max(0, l.x));
+      const by = Math.max(0, Math.min(H, l.y + l.h) - Math.max(0, l.y));
+      l.coverage = (bx * by) / (W * H);
+      l.fill = bx * by ? area / (bx * by) : 0;
+    }
+    // roles: nombre → tamaño/cobertura
+    for (const l of L) {
+      l.role = roleFromName(l.id) || roleFromName(l.name);
+      l.why = l.role ? 'nombre' : '';
+      if (!l.role && l.coverage > 0.35 && l.fill > 0.8) {
+        l.role = 'background';
+        l.why = `cubre ${(l.coverage * 100).toFixed(0)}% del lienzo`;
+      }
+    }
+    // adornos pegados a un texto (ej. ornament sobre el cartel): ≥70 % de su alfa dentro del texto (±40 px)
+    const texts0 = L.filter((l) => l.role === 'text');
+    for (const l of L) {
+      if (l.role || l.area > 0.03 * W * H) continue;
+      for (const t of texts0) {
+        const [x0, y0, x1, y1] = [t.x - 40, t.y - 40, t.x + t.w + 40, t.y + t.h + 40];
+        let inside = 0;
+        for (let y = Math.max(0, y0); y < Math.min(H, y1); y++) for (let x = Math.max(0, x0); x < Math.min(W, x1); x++) if (l.A[y * W + x] >= 16) inside++;
+        if (inside >= 0.7 * l.area) {
+          l.role = 'text';
+          l.attachedTo = t.id;
+          l.why = `pegado a ${t.id}`;
+          break;
+        }
+      }
+    }
+    for (const l of L) if (!l.role) (l.role = 'character'), (l.why = 'resto');
+    // profundidad
+    const bgs = L.filter((l) => l.role === 'background' && !l.global);
+    for (const l of L) {
+      if (l.role === 'background') l.depth = l.global ? GLOBAL_BG_DEPTH : ROLE_DEPTH.background;
+      else if (l.role === 'text' || l.role === 'fx' || l.role === 'guide') l.depth = ROLE_DEPTH[l.role];
+    }
+    const chars = L.filter((l) => l.role === 'character').sort((a, b) => a.z - b.z);
+    const [c0, c1] = CHARACTER_DEPTH_RANGE;
+    chars.forEach((l, i) => (l.depth = +(chars.length > 1 ? c0 + ((c1 - c0) * i) / (chars.length - 1) : c1).toFixed(3)));
+    const overlap = (a, b) => {
+      let n = 0;
+      for (let i = 0; i < a.A.length; i++) if (a.A[i] >= 16 && b.A[i] >= 16) n++;
+      return n;
+    };
+    for (const l of L.filter((x) => x.role === 'divider')) {
+      // pegado a la viñeta que más toca (con su alfa engordado 12 px)
+      const D = dilate(Uint8Array.from(l.A, (v) => (v >= 16 ? 1 : 0)), W, H, 12);
+      let best = null;
+      let bestN = 0;
+      for (const b of bgs) {
+        let n = 0;
+        for (let i = 0; i < D.length; i++) if (D[i] && b.A[i] >= 16) n++;
+        if (n > bestN) (bestN = n), (best = b);
+      }
+      l.depth = best ? best.depth : ROLE_DEPTH.divider;
+      l.dividerOf = best?.id || null;
+    }
+    // clipTo: el personaje está cortado contra su viñeta. Dos formas de corte:
+    //  (a) contorno que coincide con el borde alfa del fondo (±2 px, recorte con la misma máscara);
+    //  (b) contorno pegado por dentro al borde del fondo (≤14 px) o escondido bajo un divisor (corte a mano).
+    // La ventana de recorte vive en el plano del fondo: alfa del fondo ∪ divisores ∪ lo que ya asomaba afuera
+    // a propósito (engordado 40 px), así el parallax no deja ver el corte pero no se come los break-outs.
+    const divA = new Uint8Array(W * H);
+    for (const d of L.filter((x) => x.role === 'divider')) for (let i = 0; i < divA.length; i++) if (d.A[i] > divA[i]) divA[i] = d.A[i];
+    const bgInfo = new Map();
+    for (const b of bgs) {
+      const E = edgeMap(b.A, W, H);
+      bgInfo.set(b.id, { band: dilate(E, W, H, 2), wide: dilate(E, W, H, 14), near: dilate(Uint8Array.from(b.A, (v) => (v >= 32 ? 1 : 0)), W, H, 60) });
+    }
+    for (const c of chars) {
+      const E = edgeMap(c.A, W, H);
+      let edgeN = 0;
+      for (let i = 0; i < E.length; i++) edgeN += E[i];
+      c.clip = { edge: edgeN, best: null };
+      for (const b of bgs) {
+        const { band, wide, near } = bgInfo.get(b.id);
+        let cutA = 0;
+        let cutB = 0;
+        let solid = 0;
+        let out = 0;
+        for (let i = 0; i < E.length; i++) {
+          if (E[i]) {
+            if (band[i] && b.A[i] >= 32) cutA++;
+            else if ((wide[i] && b.A[i] >= 32) || (divA[i] >= 128 && near[i])) cutB++;
+          }
+          if (c.A[i] >= 128) {
+            solid++;
+            if (b.A[i] < 128) out++;
+          }
+        }
+        const cut = cutA + cutB;
+        const m = { bg: b.id, cut, cutMask: cutA, cutRect: cutB, f: +(edgeN ? cut / edgeN : 0).toFixed(3), outside: +(solid ? out / solid : 0).toFixed(3) };
+        if (!c.clip.best || cut > c.clip.best.cut) c.clip.best = m;
+      }
+      const m = c.clip.best;
+      if (m && (m.cut >= 500 || (m.cutMask >= 120 && m.f >= 0.05))) {
+        c.clipTo = m.bg;
+        const b = bgs.find((x) => x.id === m.bg);
+        let brk = new Uint8Array(W * H);
+        for (let i = 0; i < brk.length; i++) brk[i] = c.A[i] >= 128 && b.A[i] < 32 && divA[i] < 32 ? 1 : 0;
+        brk = dilate(erode(brk, W, H, 3), W, H, 43);
+        let bx0 = W, by0 = H, bx1 = -1, by1 = -1;
+        let brkN = 0;
+        const win = new Uint8Array(W * H);
+        for (let y = 0; y < H; y++)
+          for (let x = 0; x < W; x++) {
+            const i = y * W + x;
+            const base = Math.max(b.A[i], divA[i]);
+            const v = brk[i] ? 255 : base;
+            if (brk[i] && base < 32 && c.A[i] >= 128) brkN++;
+            win[i] = v;
+            if (v) {
+              if (x < bx0) bx0 = x;
+              if (x > bx1) bx1 = x;
+              if (y < by0) by0 = y;
+              if (y > by1) by1 = y;
+            }
+          }
+        const mw = bx1 - bx0 + 1;
+        const mh = by1 - by0 + 1;
+        const crop = new Uint8Array(mw * mh);
+        for (let y = 0; y < mh; y++) crop.set(win.subarray((by0 + y) * W + bx0, (by0 + y) * W + bx0 + mw), y * mw);
+        const mf = path.join(outDir, `${c.id}.clip.png`);
+        await sharp(Buffer.from(crop), { raw: { width: mw, height: mh, channels: 1 } }).png({ compressionLevel: 9 }).toFile(mf);
+        c.clipMask = { for: m.bg, file: path.relative(project.dir, mf), x: bx0, y: by0, w: mw, h: mh };
+        c.breakout = brkN;
+      }
+    }
+    // textos: suben arriba de todo salvo que se solapen con algo que en el PSD va encima
+    const byZdesc = [...L].sort((a, b) => b.z - a.z);
+    const lifted = new Set();
+    for (const t of byZdesc) {
+      if (t.role !== 'text') continue;
+      const blockers = L.filter((o) => o.z > t.z && o.role !== 'guide' && !lifted.has(o.id) && overlap(t, o) > 30);
+      if (blockers.length) {
+        t.keepOrder = true;
+        t.blockedBy = blockers.map((o) => o.id);
+      } else lifted.add(t.id);
+    }
+    // preview compuesta (sin guías) para miniaturas, hoja de contacto y respaldo DOM sin GPU
+    const comp = [];
+    for (const l of L) {
+      if (l.role === 'guide') continue;
+      const ex = { left: Math.max(0, -l.x), top: Math.max(0, -l.y) };
+      ex.width = Math.min(l.w - ex.left, W - Math.max(0, l.x));
+      ex.height = Math.min(l.h - ex.top, H - Math.max(0, l.y));
+      if (ex.width <= 0 || ex.height <= 0) continue;
+      comp.push({ input: await sharp(l.src).ensureAlpha().extract(ex).toBuffer(), left: Math.max(0, l.x), top: Math.max(0, l.y) });
+    }
+    const previewFile = path.join(outDir, '_preview.png');
+    await sharp({ create: { width: W, height: H, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).composite(comp).png().toFile(previewFile);
+    const prev = scene.assets[assetId];
+    const asset = {
+      ...(prev && prev.type === 'layers' ? { description: prev.description, focus: prev.focus } : {}),
+      type: 'layers',
+      file: path.relative(project.dir, previewFile),
+      w: W,
+      h: H,
+      layers: L.map((l) => {
+        const o = { id: l.id, name: l.name, file: l.file, x: l.x, y: l.y, w: l.w, h: l.h, z: l.z, role: l.role, depth: l.depth };
+        if (l.global) o.global = true;
+        if (l.clipTo) o.clipTo = l.clipTo;
+        if (l.clipMask) o.clipMask = l.clipMask;
+        if (l.attachedTo) o.attachedTo = l.attachedTo;
+        if (l.keepOrder) o.keepOrder = true;
+        if (l.role === 'text') o.area = l.area;
+        return o;
+      }),
+      source: { layout: path.resolve(layoutFile), scene: sc.scene, psd: doc.source || null, preview: sc.preview ? path.join(srcDir, sc.preview) : null },
+    };
+    for (const k of Object.keys(asset)) if (asset[k] === undefined) delete asset[k];
+    scene.assets[assetId] = asset;
+    let sceneId = null;
+    if (makeScenes) sceneId = addLayersScene(scene, assetId, asset);
+    results.push({ assetId, sceneId, asset, decisions: L.map((l) => ({ id: l.id, role: l.role, why: l.why, depth: l.depth, clipTo: l.clipTo || null, clip: l.clip?.best || null, breakout: l.breakout || 0, keepOrder: !!l.keepOrder, blockedBy: l.blockedBy, attachedTo: l.attachedTo, dividerOf: l.dividerOf, global: l.global })) });
+    for (const l of L) delete l.A;
+  }
+  return results;
+}
+
+// Escena nueva con la viñeta de capas ocupando la página (sin borde ni sombra) y la duración de los textos.
+function addLayersScene(scene, assetId, asset) {
+  const W = scene.meta.width;
+  const H = scene.meta.height;
+  const res = resolveLayers(asset, {}, 60);
+  let end = 3;
+  for (const r of res) if (r.role === 'text' && !r.hidden) end = Math.max(end, r.at + 0.4 + 0.25 * (wordsOf(r) || 2));
+  const duration = Math.max(4, Math.ceil((end + 1.5) * 2) / 2);
+  let id = assetId;
+  let n = 2;
+  while ((scene.scenes || []).some((s) => s.id === id)) id = `${assetId}_${n++}`;
+  scene.scenes.push({
+    id,
+    title: asset.source?.scene || assetId,
+    active: 'v1',
+    variants: [
+      {
+        id: 'v1',
+        status: 'draft',
+        summary: `Viñeta por capas ${assetId}`,
+        duration,
+        stage: { w: W, h: H, background: '#000000' },
+        transition: { preset: 'fade', duration: 0.4, ease: 'easeInOut', params: {} },
+        clips: [{ id: 'p1', track: 'panel', label: assetId, active: 'v1', variants: [{ id: 'v1', status: 'draft', preset: 'panel', start: 0, duration, params: { asset: assetId, rect: [0, 0, W, H], border: 0, shadow: false } }] }],
+      },
+    ],
+  });
+  return id;
 }

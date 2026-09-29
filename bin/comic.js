@@ -7,7 +7,7 @@ import { openProject, newScene, validate, catalog, SKILL_DIR } from '../src/proj
 import { EASES } from '../src/player/ease.js';
 import { startServer } from '../src/server.js';
 import { renderVideo, snapshots } from '../src/render.js';
-import { ingest, detectPanels, cutout } from '../src/ingest.js';
+import { ingest, detectPanels, cutout, ingestLayers } from '../src/ingest.js';
 import { activeVariant, isStale, layoutScenes, totalDuration } from '../src/shared/scene.js';
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -36,6 +36,9 @@ const HELP = `comic <comando> <proyecto> [opciones]
 
   init <dir> [--title T] [--width 1920 --height 1080 --fps 24]   crea un proyecto
   ingest <dir> <archivos...>          copia imágenes/videos a assets/ (proxy webm + hoja de contacto)
+  layers <dir> <scene_layout.json> [--exclude margins,…] [--scenes]
+                                      viñetas por capas (PNGs de un PSD + layout): un asset type 'layers'
+                                      por escena con roles, profundidad y clipTo automáticos (--scenes: y una escena por asset)
   panels <dir> <assetId>              detecta viñetas en una página → overlay numerado para revisar
   cutout <dir> <assetId>              recorta el personaje (BiRefNet, JS) → assets/<id>.cutout.png
   check <dir>                         valida scene.json
@@ -45,7 +48,8 @@ const HELP = `comic <comando> <proyecto> [opciones]
   studio <dir> [--port 4777] [--open] [--lan]   levanta el panel (--lan: accesible desde la red local)
   render <dir> [--quality 1080|4k] [--codec h264|prores] [--fps 24|30|60] [--from s --to s] [--out f.mp4]
 
-  test de paridad DOM/GPU: node test/gpu-parity.mjs [--webgl] [--keep]`;
+  test de paridad DOM/GPU: node test/gpu-parity.mjs [--webgl] [--keep]
+  test de paridad de capas vs el PSD: node test/layers-parity.mjs <scene_layout.json> [--webgl] [--keep]`;
 
 async function withServer(dir, fn) {
   ensureBuilt();
@@ -98,6 +102,31 @@ async function main() {
       console.log(`✓ ${a.id}  ${a.type}  ${a.w}×${a.h}${a.duration ? `  ${a.duration}s` : ''}  → ${a.file}`);
       if (a.contactSheet) console.log(`    hoja de contacto: ${path.join(project.dir, a.contactSheet)}  (tiempos: ${a.contactTimes.join(', ')})`);
     }
+    return;
+  }
+
+  if (cmd === 'layers') {
+    const layout = args[1];
+    if (!layout || !fs.existsSync(layout)) die('pasá la ruta del scene_layout.json');
+    const { scene, rev } = project.read();
+    const exclude = typeof flags.exclude === 'string' ? flags.exclude.split(',').map((s) => s.trim()) : [];
+    const res = await ingestLayers(project, scene, layout, { exclude, makeScenes: !!flags.scenes });
+    project.write(scene, rev);
+    const pad = (s, n) => String(s ?? '').padEnd(n);
+    for (const r of res) {
+      console.log(`\n✓ ${r.assetId}  layers ${r.asset.w}×${r.asset.h}  ${r.asset.layers.length} capas  preview ${r.asset.file}${r.sceneId ? `  → escena ${r.sceneId}` : ''}`);
+      console.log('  ' + pad('capa', 22) + pad('rol', 11) + pad('depth', 7) + pad('clipTo', 22) + 'por qué');
+      for (const d of r.decisions) {
+        const why = [d.why];
+        if (d.global) why.push('global');
+        if (d.clip) why.push(`corte contra ${d.clip.bg}: ${d.clip.cutMask}px sobre el borde + ${d.clip.cutRect}px pegado/bajo divisor, fuera del fondo ${(d.clip.outside * 100).toFixed(1)}%${d.clipTo ? (d.breakout ? `, asoma ${d.breakout}px libres` : '') : ' → libre'}`);
+        if (d.dividerOf) why.push(`pegado a ${d.dividerOf}`);
+        if (d.attachedTo) why.push(`adorno de ${d.attachedTo}`);
+        if (d.role === 'text') why.push(d.keepOrder ? `orden del PSD (se solapa con ${d.blockedBy.join(', ')})` : 'arriba de todo');
+        console.log('  ' + pad(d.id, 22) + pad(d.role, 11) + pad(d.depth, 7) + pad(d.clipTo || '—', 22) + why.filter(Boolean).join('; '));
+      }
+    }
+    console.log('\nRevisá roles y clipTo mirando la preview; se corrigen con params.layers de la viñeta (o en el asset).');
     return;
   }
 

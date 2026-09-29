@@ -3,10 +3,12 @@ import { AnimatePresence, motion } from 'motion/react';
 import { activeVariant, findTarget, isStale } from '../shared/scene.js';
 import { trackLabel, panelsOf } from './tracks.js';
 import { Field, Num, EaseSelect } from './Fields.jsx';
+import { LayersEditor, BetweenField, OrbitField, LAYER_CAMERA_PARAMS } from './Layers.jsx';
+import { layersAssetOf, isLayersParam, isLayerPairParam, layersFrontToBack } from './layers.js';
 
 const STATUS_LABEL = { draft: 'borrador', approved: 'aprobada', rejected: 'rechazada', hidden: 'escondida', stale: 'aprobada · desactualizada' };
 
-export function Inspector({ studio, scene, presets, selection, setSelection, requests, activate, layout, pickAnchor, pickingKey, draft, askConfirm, openGuide }) {
+export function Inspector({ studio, scene, presets, selection, setSelection, requests, activate, layout, pickAnchor, pickingKey, draft, askConfirm, openGuide, onLayerHot }) {
   const t = selection ? findTarget(scene, selection) : {};
   const byKind = useMemo(() => {
     const m = {};
@@ -78,7 +80,7 @@ export function Inspector({ studio, scene, presets, selection, setSelection, req
             Ajustes de <em>{v.id}</em> <span className="dim">(se guardan en la variante activa)</span>
           </h4>
           {isClip ? (
-            <ClipEditor v={v} holder={holder} editActive={editActive} byKind={byKind} presets={presets} scene={scene} sceneVariant={t.sceneVariant} pickAnchor={pickAnchor} pickingKey={pickingKey} />
+            <ClipEditor v={v} holder={holder} editActive={editActive} byKind={byKind} presets={presets} scene={scene} sceneVariant={t.sceneVariant} pickAnchor={pickAnchor} pickingKey={pickingKey} onLayerHot={onLayerHot ? (id) => onLayerHot(id && (typeof id === 'object' ? { ...baseTarget, ...id } : { ...baseTarget, layer: id })) : null} />
           ) : (
             <SceneEditor v={v} editActive={editActive} byKind={byKind} setSelection={setSelection} selection={selection} />
           )}
@@ -145,10 +147,34 @@ function SceneEditor({ v, editActive, byKind, setSelection, selection }) {
   );
 }
 
-function ClipEditor({ v, holder, editActive, byKind, presets, scene, sceneVariant, pickAnchor, pickingKey }) {
+function ClipEditor({ v, holder, editActive, byKind, presets, scene, sceneVariant, pickAnchor, pickingKey, onLayerHot }) {
   const kind = holder.track;
   const options = [...(byKind[kind] || []), ...presets.custom];
   const def = presets.builtin.find((d) => d.id === v.preset);
+  const fps = scene.meta.fps || 24;
+  const setParam = (key) => (val) =>
+    editActive((x) => {
+      const params = { ...(x.params || {}) };
+      if (val === undefined) delete params[key];
+      else params[key] = val;
+      x.params = params;
+    });
+  // viñeta de capas: la propia (preset panel) o la target (VFX)
+  const lasset = layersAssetOf(scene, v.params);
+  const declared = new Set((def?.params || []).map((p) => p.key));
+  const target = kind === 'vfx' || (def?.params || []).some(isLayerPairParam) ? targetPanel(sceneVariant, v.params?.target) : null;
+  const targetAsset = target ? layersAssetOf(scene, activeVariant(target)?.params) : null;
+  const layersEditor = lasset && (
+    <LayersEditor key="__layers" asset={lasset} value={v.params?.layers} onChange={setParam('layers')} fps={fps} onHot={onLayerHot} />
+  );
+  // resaltar en el preview la capa elegida de la viñeta target
+  const onTargetHot = onLayerHot && target ? (id) => onLayerHot(id ? { clip: target.id, layer: id } : null) : null;
+  const between = (p, value) => (
+    <div key={p.key} className="field f-between">
+      <span className="field-label">{p.label || 'Entre capas'}</span>
+      <BetweenField value={value} onChange={(val) => setParam(p.key)(val ?? undefined)} layers={targetAsset ? layersFrontToBack(targetAsset) : null} panelLabel={target ? target.label || target.id : null} onHot={onTargetHot} />
+    </div>
+  );
   return (
     <>
       <label className="field">
@@ -172,18 +198,46 @@ function ClipEditor({ v, holder, editActive, byKind, presets, scene, sceneVarian
           <Num value={v.duration} step={1 / 24} onChange={(d) => editActive((x) => (x.duration = Math.max(1 / 24, d)))} suffix="s" />
         </label>
       </div>
-      {(def?.params || []).map((p) => (
-        <Field
-          key={p.key}
-          def={p}
-          value={v.params?.[p.key] ?? def.defaults?.[p.key]}
-          ctx={{ assets: scene.assets, filters: byKind.filter, panels: panelsOf(sceneVariant), pickAnchor, pickingKey }}
-          onChange={(val) => editActive((x) => (x.params = { ...(x.params || {}), [p.key]: val }))}
-        />
-      ))}
+      {(def?.params || []).map((p) => {
+        const value = v.params?.[p.key] ?? def.defaults?.[p.key];
+        if (isLayersParam(p, lasset)) return layersEditor || null;
+        if (isLayerPairParam(p)) return between(p, value);
+        if (lasset && p.key === 'orbit') return <OrbitRow key={p.key} p={p} value={value} onChange={setParam(p.key)} />;
+        return (
+          <Field
+            key={p.key}
+            def={p}
+            value={value}
+            ctx={{ assets: scene.assets, filters: byKind.filter, panels: panelsOf(sceneVariant), pickAnchor, pickingKey }}
+            onChange={(val) => editActive((x) => (x.params = { ...(x.params || {}), [p.key]: val }))}
+          />
+        );
+      })}
+      {/* el motor todavía no declara estos params: igual se editan (se guardan en params) */}
+      {lasset && !(def?.params || []).some((p) => isLayersParam(p, lasset)) && layersEditor}
+      {lasset &&
+        LAYER_CAMERA_PARAMS.filter((p) => !declared.has(p.key)).map((p) =>
+          p.type === 'orbit' ? <OrbitRow key={p.key} p={p} value={v.params?.[p.key]} onChange={setParam(p.key)} /> : <Field key={p.key} def={p} value={v.params?.[p.key] ?? p.default} onChange={setParam(p.key)} />,
+        )}
+      {kind === 'vfx' && targetAsset && !(def?.params || []).some(isLayerPairParam) && between({ key: 'between', label: 'Entre capas' }, v.params?.between)}
       {!def && <Field def={{ key: 'params', label: 'Parámetros (efecto custom)', type: 'json' }} value={v.params} onChange={(val) => editActive((x) => (x.params = val || {}))} />}
     </>
   );
+}
+
+function OrbitRow({ p, value, onChange }) {
+  return (
+    <div className="field f-orbit">
+      <span className="field-label">{p.label || p.key}</span>
+      <OrbitField value={value} onChange={(v) => onChange(v ?? undefined)} />
+    </div>
+  );
+}
+
+// viñeta target de un VFX: la nombrada, o la primera de la escena
+function targetPanel(sceneVariant, id) {
+  const panels = (sceneVariant?.clips || []).filter((c) => c.track === 'panel');
+  return (id && panels.find((c) => c.id === id)) || (!id ? panels[0] : null) || null;
 }
 
 // ---------- variantes ----------

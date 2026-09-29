@@ -5,7 +5,13 @@ export const LAYERS = ['back', 'mid', 'front'];
 export function common({ layer = 'mid', anchor = false, style = false } = {}) {
   const out = [{ key: 'target', label: 'Viñeta (clip id; vacío = la primera de la escena)', type: 'clipRef', default: null }];
   if (anchor) out.push({ key: 'anchor', label: 'Punto [x,y] en la página (vacío = centro de la viñeta)', type: 'anchor', default: null });
-  if (layer) out.push({ key: 'layer', label: 'Capa', type: 'select', options: LAYERS, default: layer });
+  if (layer)
+    out.push(
+      { key: 'layer', label: 'Capa', type: 'select', options: LAYERS, default: layer },
+      // viñeta por capas: entre dos capas del PSD, o a una profundidad (escala depth 0..2); pisa a `layer`
+      { key: 'between', label: 'Entre capas [idAtrás, idAdelante] (viñeta por capas)', type: 'layerPair', default: null },
+      { key: 'z', label: 'Profundidad (viñeta por capas, escala depth 0..2; vacío = según capa/between)', type: 'number', min: 0, max: 2, step: 0.05, default: null },
+    );
   if (style) out.push({ key: 'style', label: 'Estilo', type: 'select', options: ['glow', 'ink'], default: 'glow' });
   out.push(
     { key: 'intensity', label: 'Intensidad', type: 'number', min: 0, max: 3, step: 0.05, default: 1 },

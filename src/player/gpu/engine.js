@@ -14,6 +14,7 @@ import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { mulberry32 } from '../../shared/scene.js';
 import { VFX_LAYER_DEPTH, layerLayout } from '../media.js';
 import { TSL_FILTERS } from './filters.js';
+import { LayersRig } from './layers.js';
 
 // Trabajamos en el mismo espacio que el navegador: valores sRGB tal cual, sin linealizar.
 // Así el filtrado de texturas, las mezclas y los colores hex coinciden con el DOM.
@@ -67,7 +68,7 @@ function withAlpha(css, k) {
 }
 
 // Quad de w×h en coordenadas locales (y hacia abajo), uv (0,0) arriba a la izquierda.
-function rectsGeometry(rects, aw, ah) {
+export function rectsGeometry(rects, aw, ah) {
   const pos = [];
   const uvs = [];
   const idx = [];
@@ -315,6 +316,8 @@ class GpuPanel {
     this.layerPx = { back: uniform(1), mid: uniform(1), front: uniform(1), screen: uniform(1) };
     // por capa: (k, dx, dy) para pasar de px de página de esa capa (con parallax) a px de página del fondo
     this.layerBase = { back: uniform(new THREE.Vector3(1, 0, 0)), mid: uniform(new THREE.Vector3(1, 0, 0)), front: uniform(new THREE.Vector3(1, 0, 0)), screen: uniform(new THREE.Vector3(1, 0, 0)) };
+    // viñeta por capas: el rig existe desde ya (los VFX piden sus grupos antes de que el renderer inicialice)
+    this.rig = mode === 'full' && this.info.layersMode ? new LayersRig(this, makeMaterial, rectsGeometry) : null;
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'cm-gpu';
     Object.assign(this.canvas.style, { position: 'absolute', left: '0', top: '0', width: this.W + 'px', height: this.H + 'px', transformOrigin: '0 0', pointerEvents: 'none', display: 'none' });
@@ -331,7 +334,10 @@ class GpuPanel {
   }
 
   async init() {
-    const renderer = new THREE.WebGPURenderer({ canvas: this.canvas, antialias: true, samples: 4, alpha: true, forceWebGL: !!this.opts.forceWebGL, powerPreference: 'high-performance' });
+    // viñeta por capas: buffers de 8 bits (el de salida y el de la escena) → cada capa se redondea a 8 bits al
+    // mezclarse, igual que la composición de Photoshop; con half float los .5 se corren 1/255
+    const exact8 = !!this.info.layersMode;
+    const renderer = new THREE.WebGPURenderer({ canvas: this.canvas, antialias: true, samples: 4, alpha: true, forceWebGL: !!this.opts.forceWebGL, powerPreference: 'high-performance', ...(exact8 ? { outputBufferType: THREE.UnsignedByteType } : {}) });
     renderer.setPixelRatio(1);
     renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
     renderer.toneMapping = THREE.NoToneMapping;
@@ -343,7 +349,11 @@ class GpuPanel {
     this.backend = renderer.backend.isWebGPUBackend ? 'webgpu' : 'webgl2';
     this.camera.coordinateSystem = renderer.coordinateSystem;
     this.maxAniso = renderer.getMaxAnisotropy ? renderer.getMaxAnisotropy() : 16;
-    if (this.mode === 'full') this.buildMedia();
+    if (this.mode === 'full') {
+      // viñeta por capas: planos 3D en perspectiva (gpu/layers.js); si no, la imagen con sus capas 2.5D
+      if (this.rig) this.rig.build();
+      else this.buildMedia();
+    }
     await Promise.all(this.texturesLoading);
     this.resize();
     this.buildPipeline();
@@ -402,8 +412,10 @@ class GpuPanel {
   }
 
   // ---- API para los VFX ----
-  layerGroup(name) {
-    if (!this.groups[name] || !(name in this.layerPx)) throw new Error(`capa desconocida "${name}" (back|mid|front|screen)`);
+  layerGroup(name, ctx) {
+    if (!['back', 'mid', 'front', 'screen'].includes(name)) throw new Error(`capa desconocida "${name}" (back|mid|front|screen)`);
+    // viñeta por capas: el grupo va a la profundidad de `between`/`z`/layer entre los planos del PSD
+    if (this.rig) return this.rig.layerGroup(name, ctx);
     const g = new THREE.Group();
     this.groups[name].add(g);
     return g;
@@ -437,7 +449,7 @@ class GpuPanel {
       this.pipeline = null;
     }
     const filters = this.mode === 'full' ? (this.info.filters || []).filter((f) => TSL_FILTERS[f.preset]) : [];
-    const scenePass = TSL.pass(this.scene, this.camera, { samples: 4 });
+    const scenePass = TSL.pass(this.scene, this.camera, { samples: 4, ...(this.rig ? { type: THREE.UnsignedByteType } : {}) });
     this.scenePass = scenePass;
     const H = this.postHelpers();
     let cur = scenePass.getTextureNode();
@@ -600,6 +612,16 @@ class GpuPanel {
     u.inv1.value.set(inv.b, inv.d, inv.f);
     const lin = Math.sqrt(Math.abs(det));
     u.pxScale.value = lin * this.pixelScale;
+    // viñeta por capas: proyección en perspectiva, planos y grupos de VFX los arma el rig
+    if (this.rig) {
+      this.rig.update(M);
+      const draft = !!this.opts.draft?.();
+      for (const pg of this.particleGeos) pg.geo.instanceCount = draft ? Math.max(1, Math.ceil(pg.n * 0.35)) : pg.n;
+      this.scene.updateMatrixWorld(true);
+      this.pipeline.render();
+      this.submitted = true;
+      return;
+    }
     // capas de la imagen
     const view = info.view;
     for (const mm of this.mediaMeshes || []) {
@@ -689,6 +711,8 @@ class GpuPanel {
     const time = uniform(0);
     const enabled = uniform(0);
     const own = [];
+    // en una viñeta por capas cada clip tiene sus propias capas (profundidad por between/z)
+    const key = (name) => (panel.rig ? panel.rig.slot(name, ctx).key : name);
     const api = {
       THREE,
       TSL,
@@ -701,7 +725,7 @@ class GpuPanel {
       pxScale: panel.u.pxScale,
       uniform: (v) => uniform(v),
       layer(name = 'mid') {
-        const g = panel.layerGroup(name);
+        const g = panel.layerGroup(name, ctx);
         own.push(g);
         g.userData.layer = name;
         return g;
@@ -710,13 +734,13 @@ class GpuPanel {
         return api.layer('screen');
       },
       // tamaño mínimo/antialias: px de dispositivo por px de página en esa capa
-      layerPx: (name) => panel.layerPx[name],
+      layerPx: (name) => panel.layerPx[key(name)],
       // (P) → P en px de página del fondo: para máscaras que tienen que quedar fijas al dibujo de la viñeta
-      toBase: (name) => (P) => P.mul(panel.layerBase[name].x).add(panel.layerBase[name].yz),
+      toBase: (name) => (P) => P.mul(panel.layerBase[key(name)].x).add(panel.layerBase[key(name)].yz),
       material: makeMaterial,
       particles(spec, layerName = 'mid') {
         const g = api.layer(layerName);
-        const parts = makeParticles({ time, pxScale: panel.layerPx[layerName] }, { seed: ctx.seed, ...spec });
+        const parts = makeParticles({ time, pxScale: panel.layerPx[key(layerName)] }, { seed: ctx.seed, ...spec });
         g.add(parts);
         panel.particleGeos.push(parts.userData.particles);
         return parts;

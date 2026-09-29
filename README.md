@@ -43,6 +43,7 @@ Le pasás imágenes y videos a Claude, arma una animación tipo cómic (viñetas
   - Hojas de contacto para que Claude "vea" los videos.
   - Detección de viñetas en páginas de cómic (OpenCV.js).
   - Recorte de personajes para parallax (BiRefNet_lite en JS, sin Python).
+  - **Material por capas** exportado del PSD (PNG más `scene_layout.json`): cada capa es un plano 3D real, con roles y profundidad automáticos, dolly con parallax de verdad y VFX entre capas. Con la cámara quieta coincide píxel a píxel con el PSD.
 - **Export** cuadro por cuadro con Chromium headless (con GPU) y ffmpeg.
 
 ## Requisitos

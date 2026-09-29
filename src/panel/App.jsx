@@ -24,6 +24,7 @@ const store = {
   },
 };
 import { scenePage, pageMapping } from './pageMap.js';
+import { layersAssetOf, layerPageQuad, effectiveLayer } from './layers.js';
 
 const GPU_LABEL = { webgpu: 'WebGPU', webgl2: 'WebGL2' };
 const GPU_TIP = { webgpu: 'Los VFX se dibujan con WebGPU', webgl2: 'sin WebGPU: se usa WebGL2' };
@@ -55,6 +56,8 @@ export function App() {
   const [pick, setPick] = useState(null); // { key, target } mientras se apunta en el preview
   const [hover, setHover] = useState(null); // coords de página bajo la mira
   const [markers, setMarkers] = useState([]);
+  const [layerHot, setLayerHot] = useState(null); // { scene, clip, sceneVariant, layer } fila de capa bajo el mouse
+  const [layerOutline, setLayerOutline] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
   const abMemory = useRef({}); // holderKey -> variante anterior para A/B
   const [guide, setGuide] = useState(null); // { id?, target, visible }
@@ -226,6 +229,27 @@ export function App() {
         }),
     );
   }, [mapping, selAnchor, time, fit, buildTick]);
+
+  // contorno de la capa resaltada en el editor de capas (aprox.: sin el parallax 3D)
+  useEffect(() => setLayerHot(null), [selection?.scene, selection?.clip]);
+  useLayoutEffect(() => {
+    const inner = innerRef.current;
+    if (!layerHot || !scene || !inner) return setLayerOutline((x) => (x ? null : x));
+    const tt = findTarget(scene, layerHot);
+    const v = activeVariant(tt.holder);
+    const asset = layersAssetOf(scene, v?.params);
+    const layer = asset?.layers.find((l) => l.id === layerHot.layer);
+    const index = layout.findIndex((e) => e.scene.id === layerHot.scene && e.variant === tt.sceneVariant);
+    const m = layer && index >= 0 ? pageMapping(scenePage(playerRef.current?.frameEl, index)) : null;
+    if (!m) return setLayerOutline(null);
+    const entry = layout[index];
+    const stage = { w: tt.sceneVariant?.stage?.w || scene.meta.width, h: tt.sceneVariant?.stage?.h || scene.meta.height };
+    const quad = layerPageQuad(v.params, asset, layer, stage, v.duration, time - entry.start - (v.start || 0));
+    const r = inner.getBoundingClientRect();
+    const pts = quad.map((q) => m.toScreen(q)).map(([x, y]) => [x - r.left, y - r.top]);
+    const e = effectiveLayer(layer, v.params?.layers?.[layer.id]);
+    setLayerOutline({ pts, name: layer.name || layer.id, role: e.role, hidden: e.hidden, id: layer.id });
+  }, [layerHot, scene, layout, time, fit, buildTick]);
 
   const startPick = useCallback(
     (key) => {
@@ -415,6 +439,15 @@ export function App() {
                 </span>
               </div>
             ))}
+            {layerOutline && (
+              <svg className={'layer-outline r-' + layerOutline.role + (layerOutline.hidden ? ' off' : '')} width="100%" height="100%">
+                <polygon points={layerOutline.pts.map((p) => p.join(',')).join(' ')} />
+                <text x={Math.min(...layerOutline.pts.map((p) => p[0])) + 6} y={Math.max(14, Math.min(...layerOutline.pts.map((p) => p[1])) + 16)}>
+                  {layerOutline.name}
+                  {layerOutline.hidden ? ' (oculta)' : ''}
+                </text>
+              </svg>
+            )}
             <AnimatePresence>
               {draft && (
                 <motion.div key="draft" className="draft-stamp" initial={{ scale: 1.6, opacity: 0, rotate: -14 }} animate={{ scale: 1, opacity: 1, rotate: -8 }} exit={{ opacity: 0, scale: 0.9 }} transition={{ type: 'spring', stiffness: 420, damping: 22 }}>
@@ -464,6 +497,7 @@ export function App() {
           draft={draft}
           askConfirm={askConfirm}
           openGuide={openGuide}
+          onLayerHot={setLayerHot}
         />
       </main>
 
