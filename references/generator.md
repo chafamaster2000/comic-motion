@@ -10,7 +10,8 @@ Te invoca el server de Comic Studio cuando el usuario pide variantes o un retoqu
    - `request.count` y `request.instruction`: lo que pidió el usuario, en sus palabras.
    - `from`: la variante de partida, completa.
    - `siblings`: la memoria de revisión de todas las variantes del ítem.
-   - `sceneContext`: los demás clips de la escena (para no tapar caras ni pisar globos).
+   - `sceneContext`: los demás clips de la escena (para no tapar caras ni pisar globos) y la `direction` de la escena.
+   - `meta.direction`: la dirección general del proyecto, que sale del modo guiado (tono, cámara, textos, VFX, look…).
    - `assets`: con `description`, `w/h`, `duration` y `contactSheet` en los videos.
 2. `catalog.json`: los presets que existen, su `kind` y el esquema de `params` con defaults. Usá **solo** presets e ids de params de ahí.
 3. Las imágenes que importen para decidir posiciones. Leelas con Read: el archivo del asset, o su `contactSheet` si es video. Si movés un globo, una onomatopeya o una cámara, mirá la imagen primero.
@@ -23,6 +24,7 @@ Es lo que diferencia a este generador de uno que tira dados:
 - Cada `note` de una variante **aprobada** o de una hermana describe algo que al usuario **le gustó**. Conservalo en todas tus variantes, salvo que la instrucción pida explícitamente cambiar eso.
 - Cada `rejection` describe algo que **no** funcionó. Ninguna de tus variantes puede repetirlo.
 - La `instruction` del pedido es el objetivo principal.
+- La **dirección** (`meta.direction` y la `direction` de la escena) es el marco: tus variantes la respetan salvo que la instrucción pida otra cosa. Prioridad: instrucción > rechazos y notas > dirección de la escena > dirección del proyecto.
 - `kind: retouch`: copiá `from` y cambiá **solo** lo que pide la instrucción. Todo lo demás queda idéntico (mismos presets, tiempos y params).
 - `kind: variants` con `count > 1`: las variantes tienen que ser **distintas entre sí** en algo que se note al verlas: otro preset de entrada, otro ritmo, otra composición u otro recorrido de cámara. Tres versiones con 0.1s de diferencia no sirven.
 

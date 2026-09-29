@@ -1,8 +1,10 @@
 // Modelo de escena compartido por player, panel, server y CLI.
 // scene.json:
-//   meta   { title, width, height, fps, background, generatorModel, maxVariants }
+//   meta   { title, width, height, fps, background, generatorModel, guideModel?, maxVariants, direction? }
 //   assets { [id]: { file, type: 'image'|'video', w, h, duration?, proxy?, cutout?, description?, focus?, bubbleSafe?, inOut? } }
-//   scenes [ { id, title, active, variants: [SceneVariant] } ]
+//   scenes [ { id, title, active, direction?, variants: [SceneVariant] } ]
+// direction (meta y escena): { clave: texto } del modo guiado. Vive en el holder, no en las variantes,
+// así que no entra en contentHash: cambiarla no desactualiza aprobaciones.
 // SceneVariant { id, status, parent?, instruction?, note?, rejection?, approvedHash?, createdAt?,
 //                duration, stage?: {w,h,background}, transition?: {preset, duration, ease, params},
 //                clips: [ { id, track, label, active, variants: [ClipVariant] } ] }

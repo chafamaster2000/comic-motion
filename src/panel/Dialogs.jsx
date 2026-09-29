@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 
-const Backdrop = ({ onClose, children, side }) => (
+export const Backdrop = ({ onClose, children, side }) => (
   <motion.div className={'backdrop ' + (side ? 'side' : '')} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
     {children}
   </motion.div>

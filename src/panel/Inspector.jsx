@@ -6,7 +6,7 @@ import { Field, Num, EaseSelect } from './Fields.jsx';
 
 const STATUS_LABEL = { draft: 'borrador', approved: 'aprobada', rejected: 'rechazada', hidden: 'escondida', stale: 'aprobada · desactualizada' };
 
-export function Inspector({ studio, scene, presets, selection, setSelection, requests, activate, layout, pickAnchor, pickingKey, draft, askConfirm }) {
+export function Inspector({ studio, scene, presets, selection, setSelection, requests, activate, layout, pickAnchor, pickingKey, draft, askConfirm, openGuide }) {
   const t = selection ? findTarget(scene, selection) : {};
   const byKind = useMemo(() => {
     const m = {};
@@ -70,7 +70,7 @@ export function Inspector({ studio, scene, presets, selection, setSelection, req
         })} />
       </div>
 
-      <VariantPanel studio={studio} holder={holder} level={t.level} baseTarget={baseTarget} requests={requests} activate={activate} scene={scene} draft={draft} askConfirm={askConfirm} />
+      <VariantPanel studio={studio} holder={holder} level={t.level} baseTarget={baseTarget} requests={requests} activate={activate} scene={scene} draft={draft} askConfirm={askConfirm} openGuide={openGuide} />
 
       {v && (
         <div className="editor">
@@ -187,7 +187,7 @@ function ClipEditor({ v, holder, editActive, byKind, presets, scene, sceneVarian
 }
 
 // ---------- variantes ----------
-function VariantPanel({ studio, holder, level, baseTarget, requests, activate, scene, draft, askConfirm }) {
+function VariantPanel({ studio, holder, level, baseTarget, requests, activate, scene, draft, askConfirm, openGuide }) {
   const [showHidden, setShowHidden] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [count, setCount] = useState(scene.meta.maxVariants || 3);
@@ -215,6 +215,16 @@ function VariantPanel({ studio, holder, level, baseTarget, requests, activate, s
             }}
           >
             Generar variantes
+          </button>
+          <button
+            className="btn guide-btn"
+            title="Claude te hace preguntas (de a una, con recomendación) antes de generar. Usa el texto de arriba como punto de partida."
+            onClick={() => {
+              openGuide?.(baseTarget, prompt.trim());
+              setPrompt('');
+            }}
+          >
+            Guiado
           </button>
         </div>
       </div>

@@ -5,7 +5,11 @@ Es la única fuente de verdad. El panel, el export y el generador leen y escribe
 ## Estructura
 
 ```
-meta     { title, width: 1920, height: 1080, fps: 24, background, generatorModel: "sonnet", maxVariants: 3 }
+meta     { title, width: 1920, height: 1080, fps: 24, background, generatorModel: "sonnet", maxVariants: 3, generatorConcurrency: 3,
+           guideModel?: "sonnet", direction?: { destino, duracion, tono, textos, camara, transiciones, profundidad, vfx, look, final, … } }
+         direction: decisiones del modo guiado (claves libres, valores en texto, con las palabras del usuario).
+         Cada escena puede tener también su propio `direction` (mismo formato) al lado de `variants`.
+         Cambiar la dirección no desactualiza aprobaciones: guía las variantes que se generen después.
 assets   { <assetId>: Asset }
 scenes   [ Scene ]           ← en orden de reproducción
 ```

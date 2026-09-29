@@ -6,6 +6,7 @@ import os from 'node:os';
 import { openProject, catalog, validate, SKILL_DIR, Conflict } from './project.js';
 import { reviewAction } from './shared/scene.js';
 import { createQueue } from './generator.js';
+import { createGuides } from './guide.js';
 import { renderVideo } from './render.js';
 
 const MIME = {
@@ -46,6 +47,7 @@ export function startServer({ projectDir, port = 0, host = '127.0.0.1', withQueu
   };
 
   const queue = withQueue ? createQueue(project, { onChange: (list) => send('queue', list) }) : null;
+  const guides = withQueue ? createGuides(project, { queue, onChange: (g) => send('guide', g) }) : null;
 
   // cambios externos (Claude editando scene.json, el generador, otro tab)
   let watchTimer;
@@ -184,6 +186,42 @@ export function startServer({ projectDir, port = 0, host = '127.0.0.1', withQueu
         queue?.cancel(p.split('/')[3]);
         return json(res, 200, { ok: true });
       }
+      // ---------- modo guiado ----------
+      if (p === '/api/guide' && req.method === 'GET') return json(res, 200, guides ? guides.open() : []);
+      if (p === '/api/guide' && req.method === 'POST') {
+        if (!guides) return json(res, 400, { error: 'modo guiado deshabilitado' });
+        const body = await readBody(req);
+        return json(res, 200, guides.create({ target: body.target, instruction: body.instruction }));
+      }
+      if (p.startsWith('/api/guide/')) {
+        if (!guides) return json(res, 400, { error: 'modo guiado deshabilitado' });
+        const [, , , id, action] = p.split('/');
+        try {
+          if (!action && req.method === 'GET') {
+            const g = guides.get(id);
+            return g ? json(res, 200, g) : json(res, 404, { error: 'sesión no encontrada' });
+          }
+          if (req.method !== 'POST') return json(res, 405, { error: 'método no permitido' });
+          const body = await readBody(req);
+          if (action === 'answer') return json(res, 200, guides.answer(id, body.answer));
+          if (action === 'finish') return json(res, 200, guides.finish(id));
+          if (action === 'retry') return json(res, 200, guides.retry(id));
+          if (action === 'cancel') return json(res, 200, guides.cancel(id));
+          if (action === 'apply') {
+            const r = guides.apply(id, { count: body.count, kind: body.kind });
+            if (r.rev) {
+              lastRev = r.rev;
+              send('scene', { rev: r.rev });
+            }
+            return json(res, 200, r);
+          }
+          return json(res, 404, { error: 'acción desconocida ' + action });
+        } catch (e) {
+          if (e.httpStatus) return json(res, e.httpStatus, { error: e.message });
+          if (e instanceof Conflict) return json(res, 409, { error: e.message });
+          throw e;
+        }
+      }
       if (p === '/api/render' && req.method === 'GET') return json(res, 200, render);
       if (p === '/api/render/cancel' && req.method === 'POST') {
         stopRender = true;
@@ -237,6 +275,7 @@ export function startServer({ projectDir, port = 0, host = '127.0.0.1', withQueu
       }
       json(res, 404, { error: 'ruta desconocida ' + p });
     } catch (e) {
+      if (e.httpStatus) return json(res, e.httpStatus, { error: e.message });
       log('[comic] error', e);
       json(res, 500, { error: String(e.message || e) });
     }

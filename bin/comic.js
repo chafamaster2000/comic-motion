@@ -130,6 +130,8 @@ async function main() {
     const { scene } = project.read();
     const layout = layoutScenes(scene);
     console.log(`${scene.meta.title} — ${layout.length} escenas, ${totalDuration(scene).toFixed(2)}s`);
+    const dirLines = (d, pad) => Object.entries(d || {}).map(([k, v]) => `${pad}${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
+    if (scene.meta.direction && Object.keys(scene.meta.direction).length) console.log('\nDirección del proyecto:\n' + dirLines(scene.meta.direction, '   ').join('\n'));
     const line = (v, level) => {
       const st = isStale(v, level) ? 'approved (DESACTUALIZADO)' : v.status;
       const bits = [st];
@@ -142,6 +144,7 @@ async function main() {
     for (const e of layout) {
       const s = e.scene;
       console.log(`\n[${s.id}] ${s.title || ''}  ${e.start.toFixed(2)}–${e.end.toFixed(2)}s  activa=${activeVariant(s)?.id}`);
+      if (s.direction && Object.keys(s.direction).length) console.log('   dirección:\n' + dirLines(s.direction, '     ').join('\n'));
       for (const v of s.variants) if (v.status !== 'hidden') console.log(`   ${v.id}: ${line(v, 'scene')}`);
       for (const c of activeVariant(s).clips || []) {
         const av = activeVariant(c);
@@ -159,6 +162,18 @@ async function main() {
       if (reqs.length) {
         console.log('\nPedidos abiertos:');
         for (const r of reqs) console.log(`   ${r.id} ${r.status} ${r.kind} ${JSON.stringify(r.target)} “${r.instruction}” ${r.error || ''}`);
+      }
+    }
+    const guideDir = path.join(project.internal, 'guides');
+    if (fs.existsSync(guideDir)) {
+      const open = fs
+        .readdirSync(guideDir)
+        .filter((f) => f.endsWith('.json'))
+        .map((f) => JSON.parse(fs.readFileSync(path.join(guideDir, f), 'utf8')))
+        .filter((g) => ['thinking', 'question', 'done', 'error'].includes(g.status));
+      if (open.length) {
+        console.log('\nGuiados abiertos:');
+        for (const g of open) console.log(`   ${g.id} ${g.status} ${g.target ? JSON.stringify(g.target) : 'proyecto'} · ${g.transcript.length} respuesta(s)${g.instruction ? ` · “${g.instruction}”` : ''}`);
       }
     }
     return;

@@ -26,6 +26,7 @@ Le pasás imágenes y videos a Claude, arma una animación tipo cómic (viñetas
   - Las variantes nuevas se generan solas en segundo plano con `claude -p` y respetan la memoria de revisión: conservan lo aprobado y evitan lo rechazado.
   - Escenas distintas se generan en paralelo (3 a la vez por defecto, configurable en la barra); dentro de una escena, los pedidos van en fila.
   - `A` alterna entre dos variantes para compararlas.
+  - **Guiado** en cada variante, y **Dirección** para el proyecto entero: en vez de escribir el pedido, respondés preguntas con opciones recomendadas y al final se genera.
   - Aviso de aprobación **desactualizada** cuando algo cambió después de aprobar.
 - **Presets incluidos:**
   - **Transiciones:** corte, fundido, barrido, zoom punch, deslizar, corte diagonal, iris, mancha de tinta y flash.
@@ -86,7 +87,9 @@ Abrí Claude Code en una carpeta de trabajo y pedí algo como:
 
 > Hagamos un motion comic con estas imágenes y este video: `./material/`
 
-Claude va a:
+Primero te pregunta si querés hacerlo **guiado**: mira tu material y te entrevista de a una pregunta (destino, tono, qué hacer con los textos, cámara, 2.5D, VFX, look, final), cada una con su recomendación. Las respuestas quedan como la **dirección** del proyecto y todas las variantes que se generen después la respetan. Si preferís, vas directo.
+
+Después Claude va a:
 1. crear el proyecto;
 2. mirar el material;
 3. proponerte un storyboard;

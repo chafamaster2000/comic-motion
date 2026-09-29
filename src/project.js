@@ -84,6 +84,13 @@ export function validate(scene, project) {
   const defs = Object.fromEntries(BUILTIN.map((d) => [d.id, d]));
   const m = scene.meta || {};
   if (!m.width || !m.height || !m.fps) errors.push('meta.width/height/fps faltan');
+  // dirección (modo guiado): objeto libre de textos; no participa del hash de aprobación
+  const checkDirection = (d, where) => {
+    if (d == null) return;
+    if (typeof d !== 'object' || Array.isArray(d)) warnings.push(`${where}: direction tiene que ser un objeto { clave: texto }`);
+    else for (const [k, v] of Object.entries(d)) if (typeof v !== 'string') warnings.push(`${where}: direction.${k} no es texto`);
+  };
+  checkDirection(m.direction, 'meta');
   const assetIds = new Set(Object.keys(scene.assets || {}));
   for (const [id, a] of Object.entries(scene.assets || {})) {
     if (!a.file) errors.push(`asset ${id}: falta file`);
@@ -97,6 +104,7 @@ export function validate(scene, project) {
     if (!s.id) errors.push('escena sin id');
     if (sceneIds.has(s.id)) errors.push(`${where}: id repetido`);
     sceneIds.add(s.id);
+    checkDirection(s.direction, where);
     if (!s.variants?.length) {
       errors.push(`${where}: sin variantes`);
       continue;

@@ -6,6 +6,23 @@ import { useStudio } from './useStudio.js';
 import { Timeline } from './Timeline.jsx';
 import { Inspector } from './Inspector.jsx';
 import { ExportDialog, QueueDrawer, ConfirmDialog } from './Dialogs.jsx';
+import { GuideDialog } from './Guide.jsx';
+
+const GUIDE_KEY = 'comic-motion.guide';
+const store = {
+  get: () => {
+    try {
+      return localStorage.getItem(GUIDE_KEY);
+    } catch {
+      return null;
+    }
+  },
+  set: (v) => {
+    try {
+      v ? localStorage.setItem(GUIDE_KEY, v) : localStorage.removeItem(GUIDE_KEY);
+    } catch {}
+  },
+};
 import { scenePage, pageMapping } from './pageMap.js';
 
 const GPU_LABEL = { webgpu: 'WebGPU', webgl2: 'WebGL2' };
@@ -40,6 +57,51 @@ export function App() {
   const [markers, setMarkers] = useState([]);
   const [confirmState, setConfirmState] = useState(null);
   const abMemory = useRef({}); // holderKey -> variante anterior para A/B
+  const [guide, setGuide] = useState(null); // { id?, target, visible }
+  const guideSession = guide?.id ? studio.guides[guide.id] : null;
+
+  // guiado: desde un ítem arranca directo; desde "Dirección" muestra primero la dirección actual
+  const openGuide = useCallback(
+    async (target, instruction) => {
+      setGuide({ id: null, target, visible: true, starting: !!target });
+      if (!target) return;
+      const g = await studio.startGuide(target, instruction);
+      if (!g) return setGuide(null);
+      store.set(g.id);
+      setGuide({ id: g.id, target: g.target, visible: true });
+    },
+    [studio],
+  );
+  const startProjectGuide = useCallback(
+    async (instruction) => {
+      const g = await studio.startGuide(null, instruction);
+      if (!g) return;
+      store.set(g.id);
+      setGuide({ id: g.id, target: null, visible: true });
+    },
+    [studio],
+  );
+  const closeGuide = useCallback(
+    (res) => {
+      store.set(null);
+      setGuide(null);
+      if (res?.request) {
+        studio.notify(`Pedido encolado: ${res.request.count} ${res.request.kind === 'retouch' ? 'retoque(s)' : 'variante(s)'}`);
+        setShowQueue(true);
+      } else if (res?.session?.applied?.direction) studio.notify('Dirección guardada');
+    },
+    [studio],
+  );
+  // retomar la sesión abierta si el panel se recargó
+  useEffect(() => {
+    const id = store.get();
+    if (!id) return;
+    studio.loadGuide(id).then((g) => {
+      if (g && ['thinking', 'question', 'done', 'error'].includes(g.status)) setGuide({ id: g.id, target: g.target, visible: true });
+      else store.set(null);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const fps = scene?.meta.fps || 24;
   const duration = scene ? totalDuration(scene) : 0;
@@ -239,6 +301,10 @@ export function App() {
         if (e.key === 'Escape') answerConfirm(false);
         return;
       }
+      if (guide?.visible) {
+        if (e.key === 'Escape') setGuide((g) => (g?.id ? { ...g, visible: false } : null));
+        return;
+      }
       if (pick && e.key === 'Escape') {
         e.preventDefault();
         return setPick(null);
@@ -263,7 +329,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [fps, time, duration, seek, togglePlay, toggleAB, loop, loopOn, confirmState, answerConfirm, pick, selAnchor, startPick]);
+  }, [fps, time, duration, seek, togglePlay, toggleAB, loop, loopOn, confirmState, answerConfirm, pick, selAnchor, startPick, guide]);
 
   const openReqs = requests.filter((r) => r.status === 'queued' || r.status === 'running');
 
@@ -317,6 +383,14 @@ export function App() {
             {approvedCount}/{scene.scenes.length} escenas aprobadas
           </span>
           <span className={'save ' + saveState}>{{ saved: 'guardado', dirty: 'sin guardar…', saving: 'guardando…', error: 'error al guardar' }[saveState]}</span>
+          {guide?.id && !guide.visible && (
+            <button className="btn ghost on" onClick={() => setGuide((g) => ({ ...g, visible: true }))} title="Hay un guiado abierto">
+              Guiado <b className="badge">{guideSession?.status === 'question' ? '?' : '…'}</b>
+            </button>
+          )}
+          <button className="btn ghost" onClick={() => openGuide(null)} title="Dirección general del proyecto (tono, cámara, ritmo…) — editala o revisala con el guiado">
+            Dirección
+          </button>
           <button className="btn ghost" onClick={() => setShowQueue(true)}>
             Cola {openReqs.length ? <b className="badge">{openReqs.length}</b> : null}
           </button>
@@ -389,6 +463,7 @@ export function App() {
           pickingKey={pick?.key}
           draft={draft}
           askConfirm={askConfirm}
+          openGuide={openGuide}
         />
       </main>
 
@@ -419,6 +494,18 @@ export function App() {
       <AnimatePresence>
         {showExport && <ExportDialog key="exp" studio={studio} render={render} onClose={() => setShowExport(false)} loop={loop} scene={scene} validation={validation} />}
         {confirmState && <ConfirmDialog key="confirm" title={confirmState.title} message={confirmState.message} okLabel={confirmState.okLabel} cancelLabel={confirmState.cancelLabel} onAnswer={answerConfirm} />}
+        {guide?.visible && (guide.id ? guideSession : !guide.starting) && (
+          <GuideDialog
+            key="guide"
+            studio={studio}
+            scene={scene}
+            session={guideSession}
+            target={guide.target}
+            onStart={startProjectGuide}
+            onHide={() => setGuide((g) => (g?.id ? { ...g, visible: false } : null))}
+            onDone={closeGuide}
+          />
+        )}
         {showQueue && <QueueDrawer key="q" requests={requests} onClose={() => setShowQueue(false)} cancel={studio.cancelRequest} setSelection={setSelection} />}
       </AnimatePresence>
       <AnimatePresence>

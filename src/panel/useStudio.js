@@ -17,6 +17,7 @@ export function useStudio() {
   const [validation, setValidation] = useState({ errors: [], warnings: [] });
   const [toast, setToast] = useState(null);
   const [saveState, setSaveState] = useState('saved'); // saved | dirty | saving | error
+  const [guides, setGuides] = useState({}); // id → sesión guiada (las que este panel conoce)
   const rev = useRef(null);
   const sceneRef = useRef(null);
   const dirty = useRef(false);
@@ -112,6 +113,44 @@ export function useStudio() {
 
   const cancelRequest = useCallback((id) => api('POST', `/api/requests/${id}/cancel`), []);
 
+  // ---------- modo guiado ----------
+  const putGuide = useCallback((g) => g?.id && setGuides((m) => ((m[g.id]?.seq || 0) > (g.seq || 0) ? m : { ...m, [g.id]: g })), []);
+  const startGuide = useCallback(
+    async (target, instruction) => {
+      await flush();
+      const r = await api('POST', '/api/guide', { target, instruction });
+      if (!r.ok) {
+        notify(r.data.error || 'no se pudo abrir el guiado', 'error');
+        return null;
+      }
+      putGuide(r.data);
+      return r.data;
+    },
+    [flush, notify, putGuide],
+  );
+  const loadGuide = useCallback(
+    async (id) => {
+      const r = await api('GET', `/api/guide/${id}`);
+      if (r.ok) putGuide(r.data);
+      return r.ok ? r.data : null;
+    },
+    [putGuide],
+  );
+  // action: answer | finish | retry | cancel | apply
+  const guideAction = useCallback(
+    async (id, action, body) => {
+      if (action === 'apply') await flush();
+      const r = await api('POST', `/api/guide/${id}/${action}`, body || {});
+      if (!r.ok) {
+        notify(r.data.error || 'error en el guiado', 'error');
+        return null;
+      }
+      putGuide(action === 'apply' ? r.data.session : r.data);
+      return r.data;
+    },
+    [flush, notify, putGuide],
+  );
+
   const startRender = useCallback(
     async (opts) => {
       await flush();
@@ -138,6 +177,10 @@ export function useStudio() {
     es.addEventListener('queue', (e) => setRequests(JSON.parse(e.data)));
     es.addEventListener('render', (e) => setRender(JSON.parse(e.data)));
     es.addEventListener('presets', (e) => setPresets(JSON.parse(e.data)));
+    es.addEventListener('guide', (e) => {
+      const g = JSON.parse(e.data);
+      setGuides((m) => ((m[g.id]?.seq || 0) > (g.seq || 0) ? m : { ...m, [g.id]: g }));
+    });
     const beforeUnload = (e) => {
       if (dirty.current) {
         flush();
@@ -151,5 +194,5 @@ export function useStudio() {
     };
   }, [load, flush]);
 
-  return { scene, presets, requests, render, validation, toast, saveState, edit, review, requestVariants, cancelRequest, startRender, cancelRender, notify, flush };
+  return { scene, presets, requests, render, validation, toast, saveState, edit, review, requestVariants, cancelRequest, startRender, cancelRender, notify, flush, guides, startGuide, loadGuide, guideAction };
 }

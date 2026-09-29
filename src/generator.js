@@ -4,7 +4,7 @@
 // Cada pedido vive en .comic/requests/<id>.json; la salida del modelo en .comic/requests/<id>/out/*.json.
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { runClaude } from './claude.js';
 import { SKILL_DIR, catalog, validate, mergeGenerated } from './project.js';
 import { findTarget, activeVariant, reviewContext } from './shared/scene.js';
 
@@ -99,19 +99,14 @@ export function createQueue(project, { onChange }) {
     fs.rmSync(outDir, { recursive: true, force: true });
     fs.mkdirSync(outDir, { recursive: true });
     const { scene } = project.read();
-    const { holder, level, sceneHolder, sceneVariant } = findTarget(scene, r.target);
+    const { holder, level } = findTarget(scene, r.target);
     if (!holder) throw new Error('target ya no existe');
-    fs.writeFileSync(path.join(project.internal, 'catalog.json'), JSON.stringify(catalog(project), null, 2));
+    writeCatalog(project);
     const fromVariant = holder.variants.find((v) => v.id === r.from) || activeVariant(holder);
     const brief = {
       request: { kind: r.kind, level, count: r.count, instruction: r.instruction },
       target: r.target,
-      from: fromVariant,
-      siblings: reviewContext(holder),
-      sceneContext:
-        level === 'clip'
-          ? { sceneId: sceneHolder.id, title: sceneHolder.title, duration: sceneVariant.duration, stage: sceneVariant.stage, otherClips: (sceneVariant.clips || []).filter((c) => c.id !== holder.id).map((c) => ({ id: c.id, track: c.track, label: c.label, active: activeVariant(c) })) }
-          : { sceneId: sceneHolder.id, title: sceneHolder.title, index: scene.scenes.indexOf(sceneHolder), totalScenes: scene.scenes.length },
+      ...targetContext(scene, r.target, fromVariant),
       meta: scene.meta,
       assets: scene.assets,
     };
@@ -123,48 +118,9 @@ export function createQueue(project, { onChange }) {
       `3. Escribí exactamente ${r.count} archivo(s) JSON en ${outDir}/ llamados 1.json, 2.json, … (uno por variante, nivel "${level}").`,
       `No modifiques ningún otro archivo. Terminá con una línea de resumen.`,
     ].join('\n');
-    const relOut = path.relative(project.dir, outDir).split(path.sep).join('/');
-    const args = [
-      '-p',
-      '--model',
-      scene.meta.generatorModel || 'sonnet',
-      '--allowedTools',
-      'Read',
-      'Glob',
-      'Grep',
-      `Write(${relOut}/**)`,
-      '--disallowedTools',
-      'Bash',
-      'Edit',
-      'WebFetch',
-      'WebSearch',
-      '--add-dir',
-      SKILL_DIR,
-      '--strict-mcp-config',
-      '--no-session-persistence',
-      '--output-format',
-      'json',
-    ];
-    const log = fs.openSync(path.join(dir, r.id, 'claude.log'), 'w');
-    const code = await new Promise((resolve, reject) => {
-      // prompt por stdin: evita problemas de comillas y saltos de línea con cmd.exe en Windows
-      const win = process.platform === 'win32';
-      const child = spawn('claude', win ? args.map((a) => `"${a.replace(/"/g, '\\"')}"`) : args, {
-        cwd: project.dir,
-        stdio: ['pipe', log, log],
-        shell: win,
-        env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'comic-motion' },
-      });
-      child.stdin.end(prompt);
-      running.get(r.id).child = child;
-      const timer = setTimeout(() => child.kill('SIGTERM'), 15 * 60 * 1000);
-      child.on('error', reject);
-      child.on('exit', (c) => {
-        clearTimeout(timer);
-        resolve(c);
-      });
-    });
-    fs.closeSync(log);
+    const { child, done } = runClaude({ cwd: project.dir, prompt, model: scene.meta.generatorModel || 'sonnet', outDir, logFile: path.join(dir, r.id, 'claude.log') });
+    running.get(r.id).child = child;
+    const code = await done;
     if (r.status === 'cancelled') return;
     const files = fs.existsSync(outDir) ? fs.readdirSync(outDir).filter((f) => f.endsWith('.json')).sort() : [];
     if (!files.length) throw new Error(`claude terminó (código ${code}) sin escribir variantes. Ver .comic/requests/${r.id}/claude.log`);
@@ -208,4 +164,27 @@ export function createQueue(project, { onChange }) {
 
   pump();
   return { add, cancel, list, pump };
+}
+
+// Lo que el modelo necesita saber del ítem: variante de partida, memoria de revisión de las hermanas
+// y el resto de la escena (con la dirección de la escena). Lo usan el generador y el modo guiado.
+export function targetContext(scene, target, fromVariant) {
+  const { holder, level, sceneHolder, sceneVariant } = findTarget(scene, target);
+  if (!holder) return {};
+  const from = fromVariant || activeVariant(holder);
+  const direction = sceneHolder.direction || undefined;
+  return {
+    from,
+    siblings: reviewContext(holder),
+    sceneContext:
+      level === 'clip'
+        ? { sceneId: sceneHolder.id, title: sceneHolder.title, direction, duration: sceneVariant.duration, stage: sceneVariant.stage, otherClips: (sceneVariant.clips || []).filter((c) => c.id !== holder.id).map((c) => ({ id: c.id, track: c.track, label: c.label, active: activeVariant(c) })) }
+        : { sceneId: sceneHolder.id, title: sceneHolder.title, direction, index: scene.scenes.indexOf(sceneHolder), totalScenes: scene.scenes.length },
+  };
+}
+
+export function writeCatalog(project) {
+  const f = path.join(project.internal, 'catalog.json');
+  fs.writeFileSync(f, JSON.stringify(catalog(project), null, 2));
+  return f;
 }

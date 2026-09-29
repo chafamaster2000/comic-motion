@@ -13,6 +13,21 @@ Si falta `dist/` o `node_modules/`: `cd ~/.claude/skills/comic-motion && npm ins
 
 ## Flujo
 
+### 0. ¿Guiado o directo?
+En un proyecto **nuevo**, antes de `comic init`, preguntale al usuario con AskUserQuestion:
+- **Guiado (recomendado):** una entrevista de a una pregunta, con tu recomendación en cada una, para entender cómo lo quiere.
+- **Directo:** vos proponés el storyboard y él corrige.
+
+No preguntes si retoma un proyecto existente, ni si ya pidió ir directo o rápido.
+
+**Si elige guiado:**
+1. Primero mirá el material, antes del init: Read de cada imagen, y en los videos 4 a 6 cuadros sacados con ffmpeg a tu scratchpad. Así cada recomendación sale de su material.
+2. Después seguí [references/guiado.md](references/guiado.md): reglas y "Árbol para un proyecto nuevo". Las respuestas de salida (fps, carpeta, título) definen los flags de `comic init`.
+3. Al cerrar, guardá las decisiones en `meta.direction`.
+4. El paso 3 (storyboard) sale de esas respuestas: mostralo junto con el resumen y esperá el OK.
+
+**Durante el proyecto:** si el usuario pide un cambio grande o ambiguo desde el chat, ofrecé hacerlo guiado con el "Árbol para un cambio". En el panel, el mismo guiado está en el botón **Guiado** de cada variante y en **Dirección** (el proyecto entero).
+
 ### 1. Proyecto e ingesta
 - `comic init <dir> --title "…"` (16:9, 1920×1080, 24 fps por defecto; se cambia con `--width/--height/--fps`).
 - `comic ingest <dir> <archivos…>`: copia el material y mide cada archivo. Para los videos crea un proxy WebM y una **hoja de contacto** con los tiempos.
@@ -32,7 +47,7 @@ Si una imagen es una **página de cómic** con varias viñetas:
 **Terminado cuando:** todos los assets tienen `description`, y las páginas de cómic tienen `panels` verificados visualmente.
 
 ### 3. Storyboard
-Proponé al usuario, en pocas líneas, la secuencia de escenas: qué viñeta o clip va en cada una, qué pasa, la transición y la duración aproximada. Esperá su OK o sus cambios antes de escribir.
+Respetá `meta.direction` si existe (sale del guiado). Proponé al usuario, en pocas líneas, la secuencia de escenas: qué viñeta o clip va en cada una, qué pasa, la transición y la duración aproximada. Esperá su OK o sus cambios antes de escribir.
 
 ### 4. Escribir la escena
 Editá `scene.json` siguiendo [references/scene-format.md](references/scene-format.md). Si hay archivos `references/*.local.md` con criterios propios, leelos y seguilos. Cada escena y cada clip arrancan con una variante `v1` en `draft`.
@@ -52,7 +67,7 @@ Editá `scene.json` siguiendo [references/scene-format.md](references/scene-form
   - pide variantes o **retoques por prompt**.
 - Esos pedidos los resuelve solo la cola del server, con `claude -p` headless (modelo `meta.generatorModel`, hasta `meta.maxVariants` por pedido). Corre hasta `meta.generatorConcurrency` pedidos a la vez (3 por defecto, se cambia en la barra), uno por escena: los de la misma escena van en fila.
 - **Iterar varias escenas desde el chat:** si los cambios son en escenas distintas, lanzá un subagente por escena en paralelo. Ninguno escribe `scene.json` directo: o encolan pedidos con `POST /api/requests` del studio, o te devuelven el cambio de su escena y lo integrás vos releyendo el archivo. Antes, como siempre, decile al usuario qué escenas se van a tocar (lo aprobado se respeta).
-- Cuando el usuario te pida seguir desde el chat, arrancá con `comic status <dir>`: resume lo aprobado, lo rechazado con sus motivos, las notas, lo desactualizado y los pedidos abiertos o fallidos.
+- Cuando el usuario te pida seguir desde el chat, arrancá con `comic status <dir>`: resume la dirección (`meta.direction` y la de cada escena), lo aprobado, lo rechazado con sus motivos, las notas, lo desactualizado y los pedidos abiertos o fallidos.
 - **Lo aprobado se respeta.** Antes de cambiar algo desde el chat:
   1. Corré `comic status` y armá el plan de cambios: qué escenas o clips vas a regenerar o editar, por qué, y cuáles están aprobados.
   2. Decíselo al usuario en pocas líneas ("voy a regenerar X e Y por tal motivo; A y B están aprobadas y no las toco") y **esperá su OK**.
