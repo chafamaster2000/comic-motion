@@ -24,6 +24,7 @@ Le pasás imágenes y videos a Claude, arma una animación tipo cómic (viñetas
   - **Aprobar** con una nota ("qué me gusta") o **rechazar** con un motivo ("qué no funciona").
   - **Retocar** una variante por prompt, o pedir N variantes nuevas.
   - Las variantes nuevas se generan solas en segundo plano con `claude -p` y respetan la memoria de revisión: conservan lo aprobado y evitan lo rechazado.
+  - Escenas distintas se generan en paralelo (3 a la vez por defecto, configurable en la barra); dentro de una escena, los pedidos van en fila.
   - `A` alterna entre dos variantes para compararlas.
   - Aviso de aprobación **desactualizada** cuando algo cambió después de aprobar.
 - **Presets incluidos:**

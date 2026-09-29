@@ -58,6 +58,7 @@ export function startServer({ projectDir, port = 0, host = '127.0.0.1', withQueu
         if (rev !== lastRev) {
           lastRev = rev;
           send('scene', { rev });
+          queue?.pump(); // pudo cambiar meta.generatorConcurrency
         }
         if (String(file).startsWith('effects')) send('presets', catalog(project));
       } catch {}

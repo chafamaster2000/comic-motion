@@ -290,6 +290,15 @@ export function App() {
               {![24, 30, 60].includes(fps) && <option value={fps}>{fps} fps</option>}
             </select>
           </label>
+          <label className="fps-pick" title="Cuántas escenas se generan a la vez en la cola (dentro de una misma escena van en fila)">
+            <select value={scene.meta.generatorConcurrency || 3} onChange={(e) => studio.edit((s) => (s.meta.generatorConcurrency = +e.target.value))}>
+              {[1, 2, 3, 4, 6].map((n) => (
+                <option key={n} value={n}>
+                  {n === 1 ? 'cola en serie' : `${n} en paralelo`}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
         <div className="top-right">
           {GPU_LABEL[gpuBackend] && (

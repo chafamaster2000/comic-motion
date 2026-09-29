@@ -59,7 +59,7 @@ export function openProject(dir) {
 
 export function newScene({ title = 'Sin título', width = 1920, height = 1080, fps = 24 } = {}) {
   return {
-    meta: { title, width, height, fps, background: '#f4efe3', generatorModel: 'sonnet', maxVariants: 3 },
+    meta: { title, width, height, fps, background: '#f4efe3', generatorModel: 'sonnet', maxVariants: 3, generatorConcurrency: 3 },
     assets: {},
     scenes: [],
   };

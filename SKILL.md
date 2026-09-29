@@ -50,7 +50,8 @@ Editá `scene.json` siguiendo [references/scene-format.md](references/scene-form
   - arrastra clips y bordes para cambiar tiempos;
   - cambia transiciones y params en el inspector;
   - pide variantes o **retoques por prompt**.
-- Esos pedidos los resuelve solo la cola del server, con `claude -p` headless (modelo `meta.generatorModel`, hasta `meta.maxVariants` por pedido).
+- Esos pedidos los resuelve solo la cola del server, con `claude -p` headless (modelo `meta.generatorModel`, hasta `meta.maxVariants` por pedido). Corre hasta `meta.generatorConcurrency` pedidos a la vez (3 por defecto, se cambia en la barra), uno por escena: los de la misma escena van en fila.
+- **Iterar varias escenas desde el chat:** si los cambios son en escenas distintas, lanzá un subagente por escena en paralelo. Ninguno escribe `scene.json` directo: o encolan pedidos con `POST /api/requests` del studio, o te devuelven el cambio de su escena y lo integrás vos releyendo el archivo. Antes, como siempre, decile al usuario qué escenas se van a tocar (lo aprobado se respeta).
 - Cuando el usuario te pida seguir desde el chat, arrancá con `comic status <dir>`: resume lo aprobado, lo rechazado con sus motivos, las notas, lo desactualizado y los pedidos abiertos o fallidos.
 - **Lo aprobado se respeta.** Antes de cambiar algo desde el chat:
   1. Corré `comic status` y armá el plan de cambios: qué escenas o clips vas a regenerar o editar, por qué, y cuáles están aprobados.

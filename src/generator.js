@@ -1,4 +1,6 @@
-// Cola en serie de pedidos de variantes, resuelta con `claude -p` headless.
+// Cola de pedidos de variantes, resuelta con `claude -p` headless.
+// Corre hasta meta.generatorConcurrency pedidos a la vez, uno por escena: dentro de una escena van en fila
+// porque cada generación tiene que ver lo que salió (y lo que se rechazó) en la anterior.
 // Cada pedido vive en .comic/requests/<id>.json; la salida del modelo en .comic/requests/<id>/out/*.json.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -15,7 +17,7 @@ export function createQueue(project, { onChange }) {
     if (r.status === 'running') r.status = 'queued'; // se cortó el server a mitad
     reqs.set(r.id, r);
   }
-  let running = null;
+  const running = new Map(); // id → { child, sceneId }
   const save = (r) => {
     fs.writeFileSync(path.join(dir, r.id + '.json'), JSON.stringify(r, null, 2));
     onChange?.(list());
@@ -53,18 +55,27 @@ export function createQueue(project, { onChange }) {
     if (r.status === 'queued') {
       r.status = 'cancelled';
       save(r);
-    } else if (r.status === 'running' && running?.id === id) {
-      running.child?.kill('SIGTERM');
+    } else if (r.status === 'running' && running.has(id)) {
+      running.get(id).child?.kill('SIGTERM');
       r.status = 'cancelled';
       save(r);
     }
   }
 
-  async function pump() {
-    if (running) return;
-    const next = list().find((r) => r.status === 'queued');
-    if (!next) return;
-    running = { id: next.id };
+  function pump() {
+    const { scene } = project.read();
+    const limit = Math.max(1, Math.min(8, scene.meta.generatorConcurrency || 3));
+    const busy = new Set([...running.values()].map((x) => x.sceneId));
+    for (const next of list()) {
+      if (running.size >= limit) break;
+      if (next.status !== 'queued' || busy.has(next.target.scene)) continue;
+      busy.add(next.target.scene);
+      start(next);
+    }
+  }
+
+  async function start(next) {
+    running.set(next.id, { sceneId: next.target.scene });
     next.status = 'running';
     next.startedAt = new Date().toISOString();
     save(next);
@@ -79,7 +90,7 @@ export function createQueue(project, { onChange }) {
     }
     next.finishedAt = new Date().toISOString();
     save(next);
-    running = null;
+    running.delete(next.id);
     pump();
   }
 
@@ -145,7 +156,7 @@ export function createQueue(project, { onChange }) {
         env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'comic-motion' },
       });
       child.stdin.end(prompt);
-      running.child = child;
+      running.get(r.id).child = child;
       const timer = setTimeout(() => child.kill('SIGTERM'), 15 * 60 * 1000);
       child.on('error', reject);
       child.on('exit', (c) => {
@@ -157,7 +168,8 @@ export function createQueue(project, { onChange }) {
     if (r.status === 'cancelled') return;
     const files = fs.existsSync(outDir) ? fs.readdirSync(outDir).filter((f) => f.endsWith('.json')).sort() : [];
     if (!files.length) throw new Error(`claude terminó (código ${code}) sin escribir variantes. Ver .comic/requests/${r.id}/claude.log`);
-    // integrar de a una, validando contra la escena más reciente (pudo cambiar mientras generaba)
+    // integrar de a una, validando contra la escena más reciente (pudo cambiar mientras generaba).
+    // De acá hasta project.write todo es sincrónico: otra generación que termine a la vez no puede intercalarse.
     const { scene: fresh, rev } = project.read();
     const problems = [];
     const baseErrors = new Set(validate(fresh, project).errors);
@@ -195,5 +207,5 @@ export function createQueue(project, { onChange }) {
   }
 
   pump();
-  return { add, cancel, list };
+  return { add, cancel, list, pump };
 }
