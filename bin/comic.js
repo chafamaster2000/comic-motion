@@ -42,7 +42,7 @@ const HELP = `comic <comando> <proyecto> [opciones]
   status <dir>                        resumen de revisión: aprobado / rechazado / notas / pedidos
   presets                             catálogo de presets y params (markdown)
   snapshot <dir> --t 0.5,2,3.4 [--scale 0.5] [--scene s2]   cuadros PNG para mirar
-  studio <dir> [--port 4777] [--open]   levanta el panel
+  studio <dir> [--port 4777] [--open] [--lan]   levanta el panel (--lan: accesible desde la red local)
   render <dir> [--quality 1080|4k] [--codec h264|prores] [--fps 24|30|60] [--from s --to s] [--out f.mp4]
 
   test de paridad DOM/GPU: node test/gpu-parity.mjs [--webgl] [--keep]`;
@@ -211,8 +211,9 @@ async function main() {
 
   if (cmd === 'studio') {
     ensureBuilt();
-    const srv = await startServer({ projectDir: dir, port: +(flags.port || 4777) });
+    const srv = await startServer({ projectDir: dir, port: +(flags.port || 4777), host: flags.lan ? '0.0.0.0' : '127.0.0.1' });
     console.log(`✓ Comic Studio en ${srv.url}  (proyecto ${project.dir})`);
+    for (const u of srv.lan) console.log(`  en la red local: ${u}  (sin WebGPU fuera de localhost: el preview usa WebGL2)`);
     if (flags.open) {
       const [c, a] = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', srv.url]] : [process.platform === 'darwin' ? 'open' : 'xdg-open', [srv.url]];
       spawn(c, a, { stdio: 'ignore', detached: true }).unref();

@@ -2,6 +2,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { openProject, catalog, validate, SKILL_DIR, Conflict } from './project.js';
 import { reviewAction } from './shared/scene.js';
 import { createQueue } from './generator.js';
@@ -31,7 +32,7 @@ const PAGE = (title, script, css) => `<!doctype html><html lang="es"><head><meta
 <style>html,body{margin:0;padding:0;background:#000}</style></head>
 <body><div id="root"></div><script type="module" src="${script}"></script></body></html>`;
 
-export function startServer({ projectDir, port = 0, withQueue = true, log = console.log }) {
+export function startServer({ projectDir, port = 0, host = '127.0.0.1', withQueue = true, log = console.log }) {
   const project = openProject(projectDir);
   const dist = path.join(SKILL_DIR, 'dist');
   const clients = new Set();
@@ -241,10 +242,12 @@ export function startServer({ projectDir, port = 0, withQueue = true, log = cons
   });
 
   return new Promise((resolve) => {
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, host, () => {
       const url = `http://127.0.0.1:${server.address().port}`;
+      const lan = host === '127.0.0.1' ? [] : Object.values(os.networkInterfaces()).flat().filter((i) => i && i.family === 'IPv4' && !i.internal).map((i) => `http://${i.address}:${server.address().port}`);
       resolve({
         url,
+        lan,
         project,
         close: () =>
           new Promise((r) => {
