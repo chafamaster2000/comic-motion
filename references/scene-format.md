@@ -88,7 +88,7 @@ Regla de oro: `update(t)` depende **solo** de `t`, de `params` y de `ctx.rand`/`
 
 ## VFX (pista `vfx`, GPU)
 
-Efectos con three.js (`WebGPURenderer`, cae solo a WebGL2) dibujados **dentro de una viñeta**. Presets built-in: `snow`, `sparks`, `burst` (partículas), `shockwave`, `heat` (deformación), `impactFlash`, `glow` (pases de pantalla). Params comunes:
+Efectos con three.js (`WebGPURenderer`, cae solo a WebGL2) dibujados **dentro de una viñeta**. Presets built-in: `snow`, `sparks`, `burst` (partículas), `fog` (niebla), `shockwave`, `heat` (deformación), `impactFlash`, `glow` (pases de pantalla). Params comunes:
 
 | param | tipo | qué hace |
 |---|---|---|
@@ -98,6 +98,9 @@ Efectos con three.js (`WebGPURenderer`, cae solo a WebGL2) dibujados **dentro de
 | `style` | `glow` \| `ink` | glow = aditivo con halo; ink = contorno de tinta (dos pasadas) y relleno plano |
 | `stepFps` | número | 0 = continuo; 12 = animado "de a dos" (t cuantizado) |
 | `intensity` | número | multiplicador general |
+| `region` | `[[x,y],…]` o `[x,y,w,h]` | (`snow`, `fog`) polígono en px de página fuera del cual el efecto no se dibuja, con borde suave `regionFeather`. Va fijo al dibujo de la viñeta aunque la capa tenga parallax: sirve para que la nieve o la niebla no pisen el borde negro o la canaleta de una página a sangre |
+
+**Niebla (`fog`).** Bancos de niebla procedurales: fbm de ruido Perlin (4 octavas) con deformación de dominio, en `layers` láminas (1..4) con parallax propio: las lejanas más chicas, más altas y lentas; las cercanas más grandes, pegadas al piso y rápidas. Ocupa una banda baja de la viñeta (`height`, 0..1 desde abajo) con borde ondulado. Params: `density` (0..1), `color`, `height`, `speed` (viento en px/s, negativo = izquierda), `scale` (px de los bancos), `softness`, `evolve` (cuánto cambia la forma por segundo), `fade`, `avoid` (`[[x,y,w,h],…]` zonas despejadas: caras, globos), `avoidFeather`, `region`. `style: glow` = normal con un 25 % aditivo (luz dispersa); `style: ink` = `inkLevels` bandas posterizadas con filete de tinta. En `mid` queda detrás del recorte 2.5D y del depthLock; en `front` tapa todo, así que ahí usá `avoid`. Es función pura de `t` (y de la semilla del clip).
 
 **Modo GPU de la viñeta.** Si una viñeta tiene un VFX en capa `mid`/`back`, un VFX de deformación o de pantalla (`shockwave`, `heat`, `impactFlash`, `glow`) o `params.gpu: true`, three dibuja su contenido completo (fondo, recorte, depthLock, ken burns, filtros) con los mismos números que el DOM (`src/player/media.js`); la caja (borde, radio, sombra, tilt, entrada/salida) sigue siendo CSS. Si solo tiene VFX `front`, el canvas va encima de la imagen DOM. Las viñetas sin VFX no cambian. Filtros soportados en GPU: `css` (brightness, contrast, saturate, grayscale, sepia, invert, hue-rotate), `posterize`, `chroma`, `paper`, `halftone`; `ink` y los custom se ignoran (lo avisa `comic check`). En la GPU los filtros se aplican también a las partículas mid/back/front.
 
@@ -136,9 +139,10 @@ export default {
 | `layer(name='mid')` | nuevo `THREE.Group` en px de página dentro de la capa `back`\|`mid`\|`front`\|`screen` (screen = encima de todo, sin parallax). El player lo oculta fuera del clip |
 | `screen()` | = `layer('screen')` |
 | `layerPx(name)` | uniform: px de dispositivo por px de página en esa capa (para antialias/tamaño mínimo) |
+| `toBase(name)` | `(P) → P'`: pasa una posición en px de página de esa capa (con el empuje del parallax) a px de página del fondo; para máscaras que tienen que quedar fijas al dibujo |
 | `pxScale` | uniform: px de dispositivo por px local de la viñeta |
 | `material({ fragment, position?, blend: 'normal'\|'add' })` | `MeshBasicNodeMaterial` sin depth, doble cara, en **premultiplicado**: `fragment` devuelve `vec4(rgb*a, a)`; en `add` devolvé alfa 0 |
-| `particles(spec, layerName)` | partículas analíticas instanciadas. `spec: { count, motion({ r0, r1, t, idx, fx }) → { pos, vel, size, alpha, color }, style: 'glow'\|'ink'\|'soft', blend, shutter, stretch, soft, halo, outline, outlineColor }`. `r0`/`r1` = dos vec4 aleatorios por partícula (mulberry32 en JS). `pos`/`vel` en px de página; se estira según `vel` (motion blur) |
+| `particles(spec, layerName)` | partículas analíticas instanciadas. `spec: { count, motion({ r0, r1, t, idx, fx }) → { pos, vel, size, alpha, color }, mask?(P) → float, style: 'glow'\|'ink'\|'soft', blend, shutter, stretch, soft, halo, outline, outlineColor }`. `r0`/`r1` = dos vec4 aleatorios por partícula (mulberry32 en JS). `pos`/`vel` en px de página; se estira según `vel` (motion blur). `mask(P)` (opcional) multiplica el alfa por fragmento, con `P` en px de página de la capa (combinalo con `toBase`) |
 | `post(fn, { sample, order })` | pase de post sobre la viñeta (solo modo completo). `fn(io) → vec4` con `io = { color, sample(uv), uv, pagePos, localPos, framePos, pageToUv(P), pageDeltaToUv(d), pxScale, inner, panelTexture }`. `sample: true` si muestrea en otro uv (deformaciones). Se aplica solo mientras `enabled` = 1 |
 | `bloom({ strength, radius, threshold, order })` | bloom (BloomNode de three) sobre la viñeta; devuelve `{ strength, radius, threshold }` (uniforms) |
 | `panelTexture()` | textura de la viñeta compuesta ANTES de los pases de post (usable solo dentro de `post`) |

@@ -149,7 +149,7 @@ const fx = {
 // posición y velocidad en px de página a partir de dos vec4 aleatorios por partícula (generados en JS
 // con mulberry32, no en el shader) y del tiempo. Estiramiento por velocidad = desenfoque de movimiento.
 function makeParticles(api, spec) {
-  const { count, seed = 1, motion, style = 'glow', blend = style === 'glow' ? 'add' : 'normal', shutter = 1 / 48, stretch = 1, soft = 0.35, outline = 2, outlineColor = '#111111', halo = 0.6 } = spec;
+  const { count, seed = 1, motion, mask = null, style = 'glow', blend = style === 'glow' ? 'add' : 'normal', shutter = 1 / 48, stretch = 1, soft = 0.35, outline = 2, outlineColor = '#111111', halo = 0.6 } = spec;
   const n = Math.max(1, Math.floor(count));
   const rnd = mulberry32(seed >>> 0);
   const r0 = new Float32Array(n * 4);
@@ -196,7 +196,13 @@ function makeParticles(api, spec) {
     const vS = varying(sEff.add(extra), 'vS');
     const vA = varying(float(m.alpha).mul(aSmall).mul(sEff.div(L).pow(0.6)), 'vA');
     const vC = varying(vec3(m.color ?? vec3(1, 1, 1)), 'vC');
+    // máscara opcional por fragmento en px de página (ej. recortar a la forma dibujada de la viñeta)
+    const vW = mask ? varying(world, 'vW') : null;
     const frag = Fn(() => {
+      const fragCore = fragBody();
+      return mask ? fragCore.mul(float(mask(vW))) : fragCore;
+    });
+    const fragBody = () => {
       const h = max(vL.sub(vS).mul(0.5), 0);
       const d = length(vec2(max(abs(vP.x).sub(h), 0), vP.y)).div(vS.mul(0.5));
       const aa = max(fwidth(d), 1e-4);
@@ -211,8 +217,9 @@ function makeParticles(api, spec) {
       a = edge.mul(vA);
       if (ps.ink === 'outline') return vec4(vec3(new THREE.Color(outlineColor)).mul(a), a);
       return vec4(vC.mul(a), a);
-    })();
-    const mat = makeMaterial({ position: posNode, fragment: frag, blend: ps.ink ? 'normal' : blend });
+    };
+    const fragNode = frag();
+    const mat = makeMaterial({ position: posNode, fragment: fragNode, blend: ps.ink ? 'normal' : blend });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.frustumCulled = false;
     mesh.renderOrder = pi;
@@ -306,6 +313,8 @@ class GpuPanel {
       opacity: uniform(1),
     };
     this.layerPx = { back: uniform(1), mid: uniform(1), front: uniform(1), screen: uniform(1) };
+    // por capa: (k, dx, dy) para pasar de px de página de esa capa (con parallax) a px de página del fondo
+    this.layerBase = { back: uniform(new THREE.Vector3(1, 0, 0)), mid: uniform(new THREE.Vector3(1, 0, 0)), front: uniform(new THREE.Vector3(1, 0, 0)), screen: uniform(new THREE.Vector3(1, 0, 0)) };
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'cm-gpu';
     Object.assign(this.canvas.style, { position: 'absolute', left: '0', top: '0', width: this.W + 'px', height: this.H + 'px', transformOrigin: '0 0', pointerEvents: 'none', display: 'none' });
@@ -616,6 +625,9 @@ class GpuPanel {
         ty = Ld.top - (oy + L0.top) * k;
       }
       g.matrix.set(k, 0, 0, tx, 0, k, 0, ty, 0, 0, 1, 0, 0, 0, 0, 1);
+      if (name === 'back') this._backT = [tx, ty];
+      const bt = name === 'screen' ? [tx, ty] : this._backT;
+      this.layerBase[name].value.set(k, tx - bt[0], ty - bt[1]);
       g.matrixWorldNeedsUpdate = true;
       this.layerPx[name].value = k * u.pxScale.value;
     }
@@ -699,6 +711,8 @@ class GpuPanel {
       },
       // tamaño mínimo/antialias: px de dispositivo por px de página en esa capa
       layerPx: (name) => panel.layerPx[name],
+      // (P) → P en px de página del fondo: para máscaras que tienen que quedar fijas al dibujo de la viñeta
+      toBase: (name) => (P) => P.mul(panel.layerBase[name].x).add(panel.layerBase[name].yz),
       material: makeMaterial,
       particles(spec, layerName = 'mid') {
         const g = api.layer(layerName);

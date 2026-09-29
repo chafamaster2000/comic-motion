@@ -27,3 +27,51 @@ export function envelope(t, duration, fadeIn = 0.2, fadeOut = 0.3) {
   const b = fadeOut > 0 ? Math.min(1, Math.max(0, (duration - t) / fadeOut)) : 1;
   return Math.min(a, b);
 }
+
+// Param `region`: polígono [[x,y],…] en px de página (ej. la forma dibujada de la viñeta, para que el
+// efecto no pise el borde negro ni la canaleta). También acepta un rect [x,y,w,h].
+export function regionParams(what = 'el efecto') {
+  return [
+    { key: 'region', label: `Zona [[x,y],…] o [x,y,w,h] en la página donde se ve ${what} (vacío = toda la viñeta)`, type: 'json', default: null },
+    { key: 'regionFeather', label: 'Borde suave de la zona (px)', type: 'number', min: 0, max: 400, default: 4 },
+  ];
+}
+
+export function toPolygon(region) {
+  if (!Array.isArray(region) || !region.length) return null;
+  if (typeof region[0] === 'number' && region.length === 4) {
+    const [x, y, w, h] = region;
+    return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+  }
+  const pts = region.filter((q) => Array.isArray(q) && q.length >= 2).map((q) => [+q[0], +q[1]]);
+  return pts.length >= 3 ? pts : null;
+}
+
+// TSL: 0..1, 1 dentro del polígono (par-impar, sirve para cóncavos) con borde suave de `feather` px.
+export function polygonMask(TSL, P, poly, feather = 4) {
+  const { float, vec2, select, length, clamp, min, dot, mod } = TSL;
+  let dmin = null;
+  let cross = float(0);
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const A = vec2(a[0], a[1]);
+    const ex = b[0] - a[0];
+    const ey = b[1] - a[1];
+    const e = vec2(ex, ey);
+    const w = P.sub(A);
+    const ee = Math.max(1e-6, ex * ex + ey * ey);
+    const h = clamp(dot(w, e).div(ee), 0, 1);
+    const d = length(w.sub(e.mul(h)));
+    dmin = dmin ? min(dmin, d) : d;
+    if (a[1] !== b[1]) {
+      const straddle = P.y.greaterThanEqual(Math.min(a[1], b[1])).and(P.y.lessThan(Math.max(a[1], b[1])));
+      const xAt = P.y.sub(a[1]).mul((b[0] - a[0]) / (b[1] - a[1])).add(a[0]);
+      cross = cross.add(select(straddle.and(P.x.lessThan(xAt)), float(1), float(0)));
+    }
+  }
+  const inside = mod(cross, 2).greaterThan(0.5);
+  const sd = select(inside, dmin, dmin.negate());
+  // 0 sobre el borde, 1 a `feather` px hacia adentro: el efecto nunca se sale del polígono
+  return TSL.smoothstep(0, Math.max(0.5, feather), sd);
+}

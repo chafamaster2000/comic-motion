@@ -1,7 +1,7 @@
 // VFX de partículas analíticas: nieve, chispas y estallido de impacto.
 // Posición = f(semilla, t) en forma cerrada, todo en el vertex shader (instanciado). Los aleatorios por
 // partícula salen de mulberry32 en JS (atributos r0, r1), no de fract(sin()).
-import { common, targetInfo, envelope } from './common.js';
+import { common, targetInfo, envelope, regionParams, toPolygon, polygonMask } from './common.js';
 
 const TAU = Math.PI * 2;
 
@@ -20,10 +20,12 @@ export const snow = {
     { key: 'blur', label: 'Bokeh / desenfoque (0..1)', type: 'number', min: 0, max: 1, step: 0.05, default: 0 },
     { key: 'color', label: 'Color', type: 'color', default: '#ffffff' },
     { key: 'opacity', label: 'Opacidad', type: 'number', min: 0, max: 1, step: 0.05, default: 0.9 },
+    ...regionParams('la nieve'),
   ],
   build(ctx) {
     const g = ctx.gpu;
     const { vec2, vec3, float, sin, cos, floor } = g.TSL;
+    const poly = toPolygon(ctx.params.region);
     const p = ctx.params;
     const { rect } = targetInfo(ctx);
     const layer = p.layer || 'mid';
@@ -40,6 +42,7 @@ export const snow = {
     g.particles(
       {
         count: p.count ?? 2500,
+        mask: poly ? (P) => polygonMask(g.TSL, g.toBase(layer)(P), poly, p.regionFeather ?? 4) : null,
         style: p.style === 'ink' ? 'ink' : 'soft',
         blend: 'normal',
         halo: 0,

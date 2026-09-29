@@ -2,8 +2,9 @@
 import { PARTICLES } from './particles.js';
 import { DISTORT } from './distort.js';
 import { SCREEN } from './screen.js';
+import { FOG } from './fog.js';
 
-export const VFX = [...PARTICLES, ...DISTORT, ...SCREEN];
+export const VFX = [...PARTICLES, ...FOG, ...DISTORT, ...SCREEN];
 
 // Qué necesita un clip VFX de su viñeta: 'full' (la dibuja three entera) u 'overlay' (canvas encima del DOM).
 export function vfxNeeds(def, params) {
