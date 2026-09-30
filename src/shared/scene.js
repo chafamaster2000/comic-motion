@@ -37,6 +37,33 @@ export function approvedVariant(holder) {
   return holder?.variants?.find((v) => v.status === 'approved') || null;
 }
 
+// Assets para los prompts (brief del generador, contexto del guiado): sin los datos de píxeles de los límites de
+// cámara en base64 (grid/hull de capas, bands de edges; ver src/pixel-bounds.js), que no le sirven al modelo y
+// agregan decenas de KB por pedido. Quedan alpha, solid y edges { color, band }.
+export function assetsForPrompt(assets) {
+  const out = {};
+  for (const [id, a] of Object.entries(assets || {})) {
+    if (!a || typeof a !== 'object') {
+      out[id] = a;
+      continue;
+    }
+    const b = { ...a };
+    if (b.edges && typeof b.edges === 'object') {
+      const { bands, n, ...e } = b.edges;
+      b.edges = e;
+    }
+    if (Array.isArray(b.layers)) {
+      b.layers = b.layers.map((l) => {
+        if (!l || (!l.grid && !l.hull)) return l;
+        const { grid, hull, ...rest } = l;
+        return rest;
+      });
+    }
+    out[id] = b;
+  }
+  return out;
+}
+
 // Hash estable del contenido de una variante (sin campos de revisión) para detectar
 // aprobaciones desactualizadas.
 const REVIEW_KEYS = new Set(['status', 'note', 'rejection', 'approvedHash', 'createdAt', 'active']);

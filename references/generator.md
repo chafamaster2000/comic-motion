@@ -22,7 +22,7 @@ Te invoca el server de Comic Studio cuando el usuario pide variantes o un retoqu
 
 ## Cámara en viñetas por capas
 
-- Usá el preset `move3d` con `target` semántico (`"@hero"`, `"@char-2"`, `"@bg-main"`, `"layer:<id>"`), `move` (pushIn, pullOut, truck, dollyZoom, breathe…) y `amount` entre 0.2 y 0.5. Para encadenar, `shots` en un solo clip. **No** escribas keyframes `camera` con `cx/cy/w` si hay tags.
+- Usá el preset `move3d` con `target` semántico (`"@hero"`, `"@char-2"`, `"@bg-main"`, `"layer:<id>"`), `move` (pushIn, pullOut, truck, dollyZoom, breathe…) y `amount` según la tabla de `camera-recipes.md` (pushIn 1 = el objetivo llena ~80 % del cuadro; 0.5 ya es un acercamiento claro; breathe 0.2 = respiración sutil). Los límites (`bounds`, `keepText`) los aplica el preset solo: no achiques el amount por miedo a los bordes. Para encadenar, `shots` en un solo clip. **No** escribas keyframes `camera` con `cx/cy/w` si hay tags.
 - Arrancá desde la receta que corresponda a la dirección (tabla de `camera-recipes.md`) y ajustala: los clips que expande una receta son clips normales, así que podés escribirlos directamente en tu salida con el mismo formato.
 - En `params.layers` de la viñeta y en `between` de los VFX también valen `"@tag"`.
 - `meta.panelDefaults` (si existe) ya se aplica debajo de los params de cada viñeta: no repitas esos valores.

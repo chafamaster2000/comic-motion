@@ -199,6 +199,7 @@ Copia los PNG a `assets/layers/<escena>/` (las capas de la raíz del PSD, como `
 - `area`: px de alfa. Sirve para estimar el tiempo de lectura. Si sabés el texto, agregá `text: "…"` o `words: n`.
 
 - `tags` / `tagsAuto`: alias semánticos (ver abajo).
+- `alpha`, `solid`, `grid`, `hull`: datos de píxeles para los límites de cámara (bbox del alfa real, color si la capa es de un solo color, celdas y contorno del dibujo). Los escriben `comic layers` y `comic tags`; no se editan a mano (ver "Cámara 3D (move3d) y límites").
 
 ### Tags (alias semánticos de capas)
 
@@ -276,7 +277,7 @@ Con `layer` a secas:
 - `node test/layers-parity.mjs <scene_layout.json> [--webgl]` renderiza cada escena al tamaño del lienzo (1:1) con la cámara en reposo y la compara contra `previews/SCENE_XX.png`, con la guía incluida, con `autoTiming` al final de la escena y sin guía contra una composición de referencia. Da media, p99 y max por escena, y falla con max > 1/255.
 - Para lograr diferencia 0 las capas se decodifican sin premultiplicar (`createImageBitmap`, `premultiplyAlpha: 'none'`), el shader premultiplica en float y los buffers de la viñeta son de 8 bits. Cada capa se redondea al mezclarse, igual que en Photoshop. Consecuencia: en una viñeta por capas el glow/bloom de los VFX trabaja con 8 bits por canal.
 - Todas las capas se mezclan en modo normal con opacidad 1. `comic layers` avisa si el PSD traía otro modo u opacidad.
-- Los fondos no se agrandan solos (no hay overscan automático). Si un fondo a sangre deja ver su borde al panear, bajá `depthScale`, acercá ese fondo (`depth` más alto) o limitá la cámara. `comic check --gaps` encuentra esos instantes y `move3d` se limita solo (ver "Cámara 3D (move3d) y límites").
+- Los fondos no se agrandan solos (no hay overscan automático). Si un fondo a sangre deja ver su borde al panear, bajá `depthScale`, acercá ese fondo (`depth` más alto) o limitá la cámara. `comic check --gaps` encuentra esos instantes y `move3d` se limita solo (ver "Cámara 3D (move3d) y límites"; ver fuera de la viñeta sobre el marco negro de la página no cuenta como hueco).
 
 ## Cámara 3D (move3d) y límites
 
@@ -286,24 +287,28 @@ Con `layer` a secas:
 |---|---|
 | `move` | `pushIn` \| `pullOut` \| `truck` \| `pedestal` \| `dollyZoom` \| `arc` \| `crane` \| `reveal` \| `rackFocus` \| `handheld` \| `breathe` |
 | `target` | `@tag`, `layer:<id>`, `panel:<clipId>`, `region:[x,y,w,h]` (px de página) o `focus` (foco de la viñeta). Vacío = la primera viñeta de la escena |
-| `amount` | 0..1, fracción del recorrido nominal (tabla). **Nunca px**. Si los bordes no dan, se limita y avisa |
+| `amount` | 0..1, fracción del recorrido nominal (tabla). **Nunca px**. Si los huecos o los textos no dan, se limita y avisa |
 | `direction` | `left`/`right` (truck, arc, reveal), `up`/`down` (pedestal, crane, reveal), `in`/`out` (dollyZoom) |
 | `ease` | curva del tramo (default `easeInOut`) |
 | `zoom` | encuadre base (≥ 1) de los movimientos que lo usan; vacío = el del movimiento |
 | `from`, `to`, `dof` | rackFocus: capas (o depth) de foco inicial y final (default: el fondo → el objetivo) e intensidad del desenfoque |
+| `bounds` | qué cuenta como hueco: `art` (default), `panel` o `page` (ver "Qué es un hueco") |
+| `keepText` | `true` (default): los textos visibles (rol `text`) quedan enteros dentro del cuadro con 24 px de margen |
 | `shots` | encadenado `[{at, dur, move, target, amount, direction, ease, zoom}]`: cada tramo arranca donde terminó el anterior |
 
 | move | amount = 1 | encuadre base |
 |---|---|---|
-| `pushIn` | zoom ×2 hacia el objetivo (queda centrado) | la viñeta |
-| `pullOut` | arranca a zoom ×2 sobre el objetivo y abre hasta la viñeta | — |
+| `pushIn` | el objetivo llena ~80 % del cuadro (su lado más largo relativo al cuadro), con zoom entre ×2 y ×4; sin objetivo, ×2. Escala log: amount `a` → zoom `zEnd^a` (0.5 ≥ ×1.41, claramente visible) | la viñeta |
+| `pullOut` | arranca con el zoom de `pushIn` con ese amount sobre el objetivo y abre hasta la viñeta | — |
 | `truck` / `pedestal` | recorrido de medio ancho / medio alto de vista; el objetivo pasa por el centro a mitad | zoom 1.2 |
 | `dollyZoom` | distancia ×0.4 (`in`, el fondo se aleja) o ×2.5 (`out`, el fondo se viene encima); el plano del objetivo mantiene su tamaño | zoom 1.25 |
 | `arc` / `crane` | órbita de 12° / 10° alrededor del objetivo, que queda centrado | zoom 1.15 |
-| `reveal` | arranca a zoom 1.8 contra el borde opuesto a `direction` y abre hasta el objetivo | — |
+| `reveal` | arranca a zoom ×2^amount contra el borde opuesto a `direction` y abre hasta el objetivo | — |
 | `rackFocus` | no mueve la cámara: anima el foco del DOF de `from` a `to` | `zoom` o 1 |
-| `handheld` | ruido suave de ±2 % del ancho y ±0.4° (baja frecuencia, con semilla) | zoom 1.06 |
-| `breathe` | zoom lento de +3 % (período 4 s) y deriva mínima | zoom 1.04 |
+| `handheld` | ruido suave de ±2 % del ancho y ±0.4° (baja frecuencia, con semilla), con el zoom fijo justo para no ver fuera del encuadre base | 1 |
+| `breathe` | zoom lento de 0 a +8 % (período 4 s; **0.2 ≈ +1.6 %**, perceptible y sutil) con una deriva que siempre cabe en lo que ese zoom recorta: nunca muestra nada nuevo, así que no se limita aunque el tramo anterior termine pegado al borde | 1 |
+
+El objetivo de una capa es el centro del **bbox de su alfa real** (si se midió, ver abajo); en personajes el punto de mira va al 40 % del alto (la cara suele estar arriba). Un personaje de cuerpo entero que ya ocupa medio cuadro recibe igual ×2 con amount 1: termina en un plano medio.
 
 ```json
 { "id": "cam", "track": "camera", "variants": [ { "id": "v1", "status": "draft", "preset": "move3d", "start": 0, "duration": 6,
@@ -319,20 +324,33 @@ Con `layer` a secas:
 
 **Canales 3D.** Además de la cámara 2D, `move3d` devuelve `dist` (factor de distancia a igual encuadre del plano focal), `orbit` (`[yaw, pitch]` en grados, se suma al `orbit` de la viñeta) y `dof` (`{amount, focus}`, reemplaza al `dof` de la viñeta mientras la cámara lo empuje). El rig no expone el FOV: el dolly zoom se hace con `dist` (`D = D0·s0/s·dist`, equivalente a cambiar la distancia focal) y el zoom 2D se despeja para que el plano del objetivo (a `Zt`) mida lo mismo en pantalla: `r = K·dist / (dist − K·Zt)`, con `r` la escala del plano focal respecto del reposo y `K` la del arranque. La distancia nunca baja de `(0.15 − zmin)·D0`; si el dolly `in` choca con ese límite, se limita `amount`. Para centrar una capa a profundidad `Z` la vista se centra en su punto del mundo `c0 + (p − c0)(1 + Z)` (con órbita, más `tan θ · Z·D0`).
 
-**Límites (estilo "cinematic photos": el render cubre el cuadro en cada cuadro).** Al construir, `move3d` muestrea su recorrido y verifica con `src/player/bounds.js` que:
-- en una viñeta por capas, la unión de los **fondos** visibles (rol `background`, bbox en el plano de cada uno, con su parallax) cubra la parte visible de la caja;
-- si la escena en reposo está cubierta por viñetas (a sangre), la vista no salga de ellas; si no, que no salga de la página.
+**Qué es un hueco (`bounds`).** La misma definición la usan el limitador de `move3d` y `comic check --gaps`:
+- `art` (default): solo es hueco lo que se ve roto. (1) Dentro de la caja de una viñeta por capas, zonas que los fondos (rol `background`) no cubren: transparencia. (2) Fuera de la caja, el **corte recto** de algo dibujado: mirar fuera de la viñeta NO es hueco si lo que toca ese borde de la caja es el marco de la propia página —una capa de un solo color (`solid`, p. ej. el negro global de un PSD) o la franja pareja del borde de una imagen plana (`edges`)— **del mismo color que el fondo del escenario** (`stage.background` o `meta.background`). Es el caso de una página con canaletas negras sobre un escenario negro: se ve más negro, no un error. Si el borde de la caja corta un personaje, un fondo dibujado o un marco de otro color, sí es hueco, y mide lo menor entre lo que se ve afuera y lo que la caja le corta al dibujo. Los lados de la caja que ya se ven en reposo (una página con varias viñetas) son diseño y no cuentan.
+- `panel`: la vista no sale del rect de las viñetas en pantalla (a sangre, o la página si la escena no está cubierta por viñetas, como antes).
+- `page`: la vista no sale de la página.
 
-El muestreo es denso (≤ 30 fps) e incluye los **efectos de cámara de la escena** que se suman encima (`shake`, `dutch`, `dolly` de otros clips), también los que caen después de cada tramo (el siguiente arranca de ahí y move3d sostiene su vista al final). Si no da, primero corre el encuadre hacia el centro de la viñeta (en `pushIn`, `pullOut`, `reveal`; en el resto primero limita `amount`) y después limita `amount`; si ni sin moverse entra (un shake viejo sobre el encuadre de reposo), agranda el encuadre lo mínimo (overscan hasta ×1.5, salvo en `dollyZoom`). **Siempre con aviso** (`ctx.warn`, `player.warnings`, `rt.warnings`/`rt.limits` y `comic check --gaps`): `truck: amount limitado a 0.22 (pedido 1) para no ver bordes`. Las cámaras viejas (`camera`, `dolly`, `shake`…) no se tocan: solo las revisa `check --gaps`.
+Default `art` porque es lo que el espectador percibe como error; `panel`/`page` quedan para quien quiere el encuadre dentro de la caja a propósito (p. ej. páginas con fondo de papel y escenario de otro color sin datos medidos).
 
-**`comic check <dir> --gaps [fps]`** muestrea cada escena (4 fps por defecto) con la cámara compuesta (la misma función que el player, sin navegador) y reporta, con tiempos locales a la escena:
-- `s3 t=5.25–6.00s (peor en 5.50s): se ve el borde derecho de <fondo> (−34 px)` (hueco entre los fondos de una viñeta por capas);
-- `se ve fuera de la viñeta <id>` / `fuera de la página` (vista 2D que sale del contenido);
+**Datos de píxeles.** `art` necesita saber qué es marco y dónde hay dibujo. `comic layers` (al importar), `comic ingest` (imágenes) y **`comic tags`** (para proyectos existentes: mide todos los assets) guardan en el asset: por capa `alpha` (bbox del alfa real, si es más chico que el de la capa), `solid` (`#rrggbb` si la capa es de un solo color), `grid` (celdas con dibujo, base64) y `hull` (contorno por franjas, base64); por imagen plana `edges` (`{color, band, n, bands}`: franja pareja por lado y por tramo). Sin esos datos, `art` cae a `panel` en los lados que no se ven en reposo y `check --gaps` lo avisa (`corré comic tags`). Con `alpha`/`grid` la cobertura y el tamaño/centro del objetivo usan el alfa real y no el bbox del PNG (un PNG con mucho margen transparente ya no da un falso "cubierto").
+
+**Textos (`keepText`, default `true`).** Mientras una capa `text` se ve (según su `at`/`enter`/`exit`/`autoTiming`; un texto que entra más tarde cuenta recién desde que aparece), `move3d` la mantiene **entera** dentro del cuadro con 24 px de margen (4 px en `breathe`/`handheld`, que van encima de un encuadre que ya los dejó), medida ya asentada (sin el pop de entrada). Nunca pide más margen del que el texto tenía al arrancar el tramo (un cartel pegado al borde de la página en reposo se mide con el suyo); si ya arranca cortado, no se exige y se avisa. Los textos se miden con la cámara de `move3d` sola (una sacudida que asoma un cartel medio segundo no es un encuadre); los huecos, con los efectos encima. `keepText: false` lo apaga.
+
+**Prioridades del limitador** (de más a menos): 1) no ver huecos; 2) textos visibles enteros; 3) el `amount` pedido; 4) centrar el objetivo. **Excepción:** si el hueco solo aparece por un efecto de cámara breve de otro clip (un `shake` de impacto) y taparlo obligaría a agrandar el encuadre cortando un texto, gana el texto: queda un hueco de pocos px durante el temblor, avisado por el limitador y marcado por `check --gaps` (se corrige bajando la intensidad del shake o el `amount`). Al construir, `move3d` muestrea su recorrido (denso, ≤ 30 fps, más los **efectos de cámara de la escena** —`shake`, `dutch`, `dolly` de otros clips— que se suman encima, también los que caen después de cada tramo) y:
+- con textos, corre el encuadre lo mínimo para que entren (el objetivo deja de estar centrado antes que cortar un cartel);
+- si hay huecos, corre el encuadre hacia la viñeta (en `pushIn`, `pullOut`, `reveal`; en el resto primero limita `amount`) y después limita `amount`;
+- si ni sin moverse entra (un shake viejo sobre el encuadre de reposo), agranda el encuadre lo mínimo (overscan hasta ×1.5, salvo en `dollyZoom`; con textos, recentrado para que sigan enteros);
+- si el texto y el objetivo están tan separados que el objetivo queda lejos del centro, avisa (`se prioriza el texto`); si el texto no entra ni sin mover la cámara, avisa y sigue sin `keepText` en ese tramo.
+
+**Siempre con aviso** (`ctx.warn`, `player.warnings`, `rt.warnings`/`rt.limits` y `comic check --gaps`): `truck: amount limitado a 0.22 (pedido 1) para no ver bordes`, `pushIn: encuadre corrido 187 px de página para que <texto> entre entero (keepText)`. Las cámaras viejas (`camera`, `dolly`, `shake`…) no se tocan: solo las revisa `check --gaps`.
+
+**`comic check <dir> --gaps [fps]`** muestrea cada escena (4 fps por defecto) con la cámara compuesta (la misma función que el player, sin navegador) y la **misma definición de hueco** (`bounds` de la cámara `move3d` de la escena; `art` si no hay), y reporta, con tiempos locales a la escena:
+- `s3 t=5.25–6.00s (peor en 5.50s): se ve el borde derecho de <fondo> (−34 px)` (transparencia entre los fondos de una viñeta por capas);
+- `se ve fuera de la viñeta <id> y corta <capa>` (`art`) / `se ve fuera de la viñeta <id>` / `fuera de la página` (`panel`/`page`);
 - textos (rol `text`) cortados por el borde del cuadro o de su viñeta durante ≥ 0.5 s, o que aparecen (`at > 0`) enteros fuera de cuadro; globos DOM cortados;
 - VFX con `region` fuera de su viñeta;
-- los avisos de `move3d`.
+- los avisos de `move3d` y los assets sin datos de píxeles.
 
-Se saltean los tramos de entrada/salida de las viñetas. La cobertura usa el bbox de cada capa (no el alfa): un fondo con transparencias grandes puede dar un falso "cubierto". Sin `--gaps`, `check` no cambia.
+Se saltean los tramos de entrada/salida de las viñetas. La grilla del alfa es gruesa (≤ 64 celdas por lado): una transparencia más chica que una celda dentro de un fondo puede pasar como cubierta. Sin `--gaps`, `check` no cambia.
 
 ## Recetas de escena
 

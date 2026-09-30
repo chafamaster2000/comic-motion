@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { runClaude } from './claude.js';
 import { SKILL_DIR, catalog, validate, mergeGenerated } from './project.js';
-import { findTarget, activeVariant, reviewContext } from './shared/scene.js';
+import { findTarget, activeVariant, reviewContext, assetsForPrompt } from './shared/scene.js';
 import { layersSummary } from './recipes/geometry.js';
 import { listRecipes } from './recipes/index.js';
 
@@ -110,7 +110,7 @@ export function createQueue(project, { onChange }) {
       target: r.target,
       ...targetContext(scene, r.target, fromVariant),
       meta: scene.meta,
-      assets: scene.assets,
+      assets: assetsForPrompt(scene.assets), // sin los datos de píxeles de los límites (base64)
     };
     fs.writeFileSync(path.join(dir, r.id, 'brief.json'), JSON.stringify(brief, null, 2));
     const prompt = [

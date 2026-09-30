@@ -8,6 +8,7 @@ import { EASES } from '../src/player/ease.js';
 import { startServer } from '../src/server.js';
 import { renderVideo, snapshots } from '../src/render.js';
 import { ingest, detectPanels, cutout, ingestLayers, retagLayersAsset } from '../src/ingest.js';
+import { annotateAssetBounds } from '../src/pixel-bounds.js';
 import { listRecipes, applyRecipe } from '../src/recipes/index.js';
 import { hoistPanelDefaults } from '../src/project.js';
 import { activeVariant, isStale, layoutScenes, totalDuration } from '../src/shared/scene.js';
@@ -44,7 +45,8 @@ const HELP = `comic <comando> <proyecto> [opciones]
   panels <dir> <assetId>              detecta viñetas en una página → overlay numerado para revisar
   cutout <dir> <assetId>              recorta el personaje (BiRefNet, JS) → assets/<id>.cutout.png
   tags <dir> [assetId] [--reset]      alias semánticos de capas (@hero, @bg-main, @text-1…): ver/recalcular
-                                      (conserva los tags editados a mano salvo --reset)
+                                      (conserva los tags editados a mano salvo --reset); también mide alfa,
+                                      capas sólidas y el marco de las imágenes (límites de cámara)
   recipe <dir> <sceneId> <receta> [--target @hero] [--at s] [--duration s] [--replace-camera] [--activate] [--text T] [--dry]
                                       expande una receta de escena a clips normales (si la escena está aprobada,
                                       crea una variante nueva en draft). recipe --list: catálogo
@@ -145,8 +147,11 @@ async function main() {
 
   if (cmd === 'tags') {
     const { scene, rev } = project.read();
-    const ids = args[1] ? [args[1]] : Object.keys(scene.assets).filter((k) => scene.assets[k].type === 'layers');
-    if (!ids.length) die('no hay assets de capas (comic layers)');
+    const all = args[1] ? [args[1]] : Object.keys(scene.assets);
+    const ids = all.filter((k) => scene.assets[k]?.type === 'layers' || (args[1] && scene.assets[k]?.type !== 'image'));
+    // imágenes planas: solo los datos de límites de cámara (marco/canaleta del borde)
+    const imgs = all.filter((k) => scene.assets[k]?.type === 'image');
+    if (!ids.length && !imgs.length) die('no hay assets de capas (comic layers)');
     const pad = (s, n) => String(s ?? '').padEnd(n);
     for (const id of ids) {
       const a = scene.assets[id];
@@ -158,6 +163,10 @@ async function main() {
         const l = a.layers.find((x) => x.id === r.id);
         console.log('  ' + pad(r.id, 22) + pad(l.role, 11) + pad(l.depth, 7) + (r.tags.map((t) => '@' + t).join(' ') || '—') + (r.kept ? `   (editados a mano; auto: ${r.auto.map((t) => '@' + t).join(' ') || '—'})` : ''));
       }
+    }
+    for (const id of imgs) {
+      const e = await annotateAssetBounds(project.dir, scene.assets[id]);
+      console.log(`\n${id} (imagen): ${e ? `marco ${e.color}, franja [${e.band.join(', ')}] px (límites de cámara)` : 'sin marco parejo en los bordes'}`);
     }
     project.write(scene, rev);
     console.log('\nSe usan como "@hero", "@bg-main", "@text-1"… en between, clipTo, params.layers y el target de move3d. Editá `tags` en la capa para corregir (se conservan).');

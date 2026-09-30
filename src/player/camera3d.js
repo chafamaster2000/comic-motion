@@ -10,9 +10,9 @@
 //   dof   { amount, focus } que reemplaza al dof de la viñeta (rackFocus)
 // Así el pipeline 2D → 3D, la paridad de capas y los globos DOM no cambian.
 import { easing, progress, mix, clamp } from './ease.js';
-import { resolveLayerRef } from './layers.js';
+import { resolveLayerRef, layerState } from './layers.js';
 import { hashString, mulberry32, activeClips, layoutScenes } from '../shared/scene.js';
-import { panelModel, safeView, isFullBleed, defaultView, cameraAffine, boxToPage, ap, regionOutside, SIDE_ES, fmtPx } from './bounds.js';
+import { panelModel, safeView, isFullBleed, defaultView, cameraAffine, boxToPage, ap, mul, regionOutside, SIDE_ES, fmtPx, layerRect, panelLayoutAt, BOUNDS, hasFrameData } from './bounds.js';
 
 // ---------- composición de clips de cámara (player y check) ----------
 // Los clips `camera` y `move3d` sostienen su vista al terminar; los efectos (shake, dutch, dolly) terminan con su clip.
@@ -62,20 +62,33 @@ export function composeCamera(base, results) {
 // ---------- move3d ----------
 const SAFE_PX = -0.5; // misma tolerancia que safeView/check
 export const MOVES = ['pushIn', 'pullOut', 'truck', 'pedestal', 'dollyZoom', 'arc', 'crane', 'reveal', 'rackFocus', 'handheld', 'breathe'];
+// Margen de los textos visibles (keepText), px del cuadro: 24 en los movimientos; 4 en breathe/handheld (el ruido
+// es chico y va encima de un encuadre que ya dejó los 24). Nunca se pide más del que el texto tenía al arrancar.
+export const TEXT_MARGIN = 24;
+const TEXT_MARGIN_NOISY = 4;
+// pushIn/pullOut/reveal: amount 1 = el objetivo llena el 80 % del cuadro (su lado más largo relativo al cuadro),
+// con un zoom de ×2 como mínimo (objetivos grandes o la viñeta) y ×4 como máximo. El zoom va en escala log:
+// amount a → zoom = zEnd^a (0.5 = la mitad del recorrido percibido, p. ej. ×1.41 si zEnd = 2).
+// Un objetivo más grande que eso (un personaje de cuerpo entero que ya ocupa medio cuadro) igual recibe ×2 —
+// termina en un plano medio: el punto de mira de un personaje va al 40 % de su alto—, y la viñeta entera también.
+export const PUSH_FILL = 0.8;
+const PUSH_ZMIN = 2;
+const PUSH_ZPANEL = 2;
+const PUSH_ZMAX = 4;
 // recorrido nominal (amount = 1) y encuadre base de cada movimiento. amount nunca es px: es fracción de esto,
-// y si los bordes no dan se limita (con aviso).
+// y si los bordes o los textos no dan se limita (con aviso).
 export const MOVE_SPECS = {
-  pushIn: { zoom: 1, desc: 'amount 1 = el doble de cerca (zoom ×2) hacia el objetivo' },
-  pullOut: { zoom: 1, desc: 'arranca a zoom 1 + amount sobre el objetivo y abre hasta la viñeta' },
+  pushIn: { zoom: 1, desc: 'amount 1 = el objetivo llena ~80 % del cuadro (zoom ×2..×4, escala log: 0.5 ≥ ×1.41); queda centrado' },
+  pullOut: { zoom: 1, desc: 'arranca cerca del objetivo (el mismo zoom que pushIn con ese amount) y abre hasta la viñeta' },
   truck: { zoom: 1.2, desc: 'paneo lateral con parallax; amount 1 = medio ancho de vista de recorrido' },
   pedestal: { zoom: 1.2, desc: 'sube/baja la cámara; amount 1 = medio alto de vista' },
   dollyZoom: { zoom: 1.25, desc: 'la cámara se acerca (in) o se aleja (out) y el zoom compensa: el objetivo queda del mismo tamaño y cambia la perspectiva; amount 1 = distancia ×0.4 (in) / ×2.5 (out)' },
   arc: { zoom: 1.15, desc: 'órbita horizontal alrededor del objetivo; amount 1 = 12°' },
   crane: { zoom: 1.15, desc: 'órbita vertical (grúa) alrededor del objetivo; amount 1 = 10°' },
-  reveal: { zoom: 1, desc: 'arranca cerca (zoom 1 + 0.8·amount) contra un borde y abre hasta el objetivo' },
+  reveal: { zoom: 1, desc: 'arranca a zoom ×2^amount contra un borde y abre hasta el objetivo' },
   rackFocus: { zoom: 1, desc: 'cambio de foco del DOF de `from` a `to`; amount no mueve la cámara' },
-  handheld: { zoom: 1.06, desc: 'cámara en mano: ruido suave; amount 1 = ±2 % del ancho y ±0.4°' },
-  breathe: { zoom: 1.04, desc: 'respiración: zoom lento ±3 %·amount y deriva mínima' },
+  handheld: { zoom: 1, desc: 'cámara en mano: ruido suave; amount 1 = ±2 % del ancho y ±0.4° (con el zoom justo para no ver bordes)' },
+  breathe: { zoom: 1, desc: 'respiración: zoom lento de 0 a +8 %·amount (período 4 s; 0.2 ≈ +1.6 %) y deriva dentro de ese zoom' },
 };
 const DIRS = ['auto', 'left', 'right', 'up', 'down', 'in', 'out'];
 
@@ -110,7 +123,7 @@ function sceneEnv(ctx) {
   const W = ctx.frame.w;
   const H = ctx.frame.h;
   const panels = (ctx.panels || []).map((pc) => panelModel({ id: pc.id, params: pc.params || {}, asset: ctx.asset(pc.params?.asset), start: pc.start || 0, duration: pc.duration || 0, stage: ctx.stage, W, H }));
-  return { W, H, stage: ctx.stage, panels, fullBleed: isFullBleed({ W, H, stage: ctx.stage, panels }) };
+  return { W, H, stage: ctx.stage, stageColor: ctx.stage?.background ?? null, panels, fullBleed: isFullBleed({ W, H, stage: ctx.stage, panels }) };
 }
 
 // encuadre de una viñeta (sin márgenes): el mismo que la cámara en reposo del rig de capas
@@ -123,10 +136,11 @@ function framing(env, m) {
 const pageOf = (m, [x, y]) => ap(boxToPage(m), m.layout0.left + m.layout0.k * x, m.layout0.top + m.layout0.k * y);
 
 // Objetivo → { m (viñeta), X (px del lienzo, plano focal), Z (unidades de D0), page (centro en página), size [w,h] página, layer }
+// El centro y el tamaño de una capa salen del bbox de su alfa real si se midió (`alpha`).
 export function resolveTarget(env, ref, warn) {
   const panels = env.panels;
   const first = panels[0] || null;
-  const panelTarget = (m) => ({ m, Z: 0, page: m ? [m.rect[0] + m.rect[2] / 2, m.rect[1] + m.rect[3] / 2] : [env.stage.w / 2, env.stage.h / 2], size: m ? [m.rect[2], m.rect[3]] : [env.stage.w, env.stage.h], layer: null });
+  const panelTarget = (m) => ({ m, Z: 0, page: m ? [m.rect[0] + m.rect[2] / 2, m.rect[1] + m.rect[3] / 2] : [env.stage.w / 2, env.stage.h / 2], size: m ? [m.rect[2], m.rect[3]] : [env.stage.w, env.stage.h], layer: null, whole: true });
   if (ref == null || ref === '' || ref === 'panel') return panelTarget(first);
   if (Array.isArray(ref) || (typeof ref === 'string' && ref.startsWith('region:'))) {
     let r = ref;
@@ -164,15 +178,26 @@ export function resolveTarget(env, ref, warn) {
     const id = resolveLayerRef(m.layers, ref);
     if (!id) continue;
     const L = m.layers.find((l) => l.id === id);
+    const [lx, ly, lw, lh] = layerRect(L);
     const g = 1 + L.Z;
     const c0 = m.rest.c0;
-    const pc = [L.x + L.w / 2, L.y + L.h / 2];
+    // personajes: el punto de mira va un poco arriba del centro (40 % del alto: la cara suele estar arriba)
+    const pc = [lx + lw / 2, ly + lh * (L.role === 'character' ? 0.4 : 0.5)];
     // punto del mundo sobre el eje óptico: centrar la vista ahí pone el centro de la capa en el centro del cuadro
     const X = [c0[0] + (pc[0] - c0[0]) * g, c0[1] + (pc[1] - c0[1]) * g];
-    return { m, Z: L.Z, X, page: pageOf(m, X), size: [L.w * m.layout0.k, L.h * m.layout0.k], layer: L };
+    return { m, Z: L.Z, X, page: pageOf(m, X), size: [lw * m.layout0.k, lh * m.layout0.k], layer: L };
   }
   warn?.(`target ${ref}: no hay capa ni viñeta con esa referencia (se usa la viñeta)`);
   return panelTarget(first);
+}
+
+// zoom de pushIn/pullOut/reveal con amount 1 (relativo a un encuadre de ancho w0, px de página)
+export function pushZoom(env, tg, w0) {
+  const aspect = env.W / env.H;
+  if (tg.whole || !tg.size) return PUSH_ZPANEL;
+  const [tw, th] = tg.size;
+  const need = Math.max(tw, th * aspect) / PUSH_FILL;
+  return clamp(PUSH_ZMIN, PUSH_ZMAX, need > 0 ? w0 / need : PUSH_ZMIN);
 }
 
 // centro de la vista (página) para que el objetivo quede centrado con la cámara orbitada (yaw/pitch en grados):
@@ -194,6 +219,68 @@ function layerDepth(env, ref, fallback) {
   return fallback;
 }
 
+// ---------- textos (keepText) ----------
+// Esquinas en px de página de los textos de las viñetas por capas en el tiempo t de la escena (ya asentados: sin
+// la animación de entrada/salida). Los textos están en el plano focal (Z = 0): la cámara 2D los lleva exacto.
+// visible: solo los que se ven en t (según at/enter/exit/autoTiming); si no, todos (para medir su margen al arrancar).
+function textBoxes(env, t, visibleOnly = true) {
+  const out = [];
+  for (const m of env.panels) {
+    if (!m.layers) continue;
+    const lt = t - m.start;
+    if (lt < 0 || lt >= m.duration) continue;
+    const L = panelLayoutAt(m, lt);
+    const P = mul(boxToPage(m), [L.k, 0, 0, L.k, L.left, L.top]);
+    for (const r of m.layers) {
+      if (r.hidden || r.role !== 'text') continue;
+      if (visibleOnly && !layerState(r, lt, m.duration).visible) continue;
+      const still = layerState({ ...r, enter: null, exit: null }, lt, m.duration);
+      const M = mul(P, still.visible ? still.m : [1, 0, 0, 1, 0, 0]);
+      const [x, y, w, h] = layerRect(r);
+      out.push({ id: r.id, corners: [[x, y], [x + w, y], [x + w, y + h], [x, y + h]].map(([u, v]) => ap(M, u, v)) });
+    }
+  }
+  return out;
+}
+// menor distancia (px del cuadro) de las esquinas de un texto al borde del cuadro con una cámara
+function textSlack(corners, camera, W, H) {
+  const A = cameraAffine({ dx: 0, dy: 0, drot: 0, dzoom: 1, ...camera }, W, H);
+  let d = Infinity;
+  for (const [x, y] of corners) {
+    const [u, v] = ap(A, x, y);
+    d = Math.min(d, u, W - u, v, H - v);
+  }
+  return d;
+}
+
+// Corre un centro (px de página) lo mínimo para que los textos visibles al final del tramo entren enteros en una
+// vista de ancho w con su margen. Si no entran (vista chica) centra la caja de textos: ok() lo rechaza y se
+// limita amount. Devuelve [cx, cy].
+function makeFit(env, boxes, want) {
+  if (!boxes.length) return null;
+  const aspect = env.W / env.H;
+  let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
+  let req = 0;
+  for (const b of boxes) {
+    const r = want(b.id);
+    if (r == null) continue;
+    req = Math.max(req, r);
+    for (const [x, y] of b.corners) {
+      x0 = Math.min(x0, x);
+      y0 = Math.min(y0, y);
+      x1 = Math.max(x1, x);
+      y1 = Math.max(y1, y);
+    }
+  }
+  if (!(x1 > x0)) return null;
+  const fit1 = (c, lo, hi) => (lo <= hi ? clamp(lo, hi, c) : (lo + hi) / 2);
+  return (c, w) => {
+    const h = w / aspect;
+    const mx = (req * w) / env.W + 0.5;
+    return [fit1(c[0], x1 + mx - w / 2, x0 - mx + w / 2), fit1(c[1], y1 + mx - h / 2, y0 - mx + h / 2)];
+  };
+}
+
 // Plan de un tramo: { path(e, lt) → estado } con amount ya escalado por k (y lam para centrar en el objetivo).
 function planShot(env, shot, start, k, lam, ctxLike) {
   const move = shot.move;
@@ -206,19 +293,23 @@ function planShot(env, shot, start, k, lam, ctxLike) {
   const dir = shot.direction && shot.direction !== 'auto' ? shot.direction : null;
   const center = (c) => ({ cx: c[0], cy: c[1] });
   const towards = (from, to, l) => [mix(from[0], to[0], l), mix(from[1], to[1], l)];
+  // keepText: el encuadre se corre lo mínimo para que entren los textos (prioridad sobre centrar el objetivo)
+  const fitFn = shot._fit || null; // se captura: los path() se evalúan después
+  const fit = (c, w) => (fitFn ? fitFn(c, w) : c);
   const T0 = tg.page;
-  const tight = (z, c) => ({ ...baseState(B), ...center(c), w: B.w / z });
+  const tight = (z, c) => ({ ...baseState(B), ...center(fit(c, B.w / z)), w: B.w / z });
   const S0 = start || tight(zoom, towards([B.cx, B.cy], T0, lam));
   const hr = ctxLike.hashRand;
   switch (move) {
     case 'pushIn': {
       const from = start || baseState(B);
-      const to = { ...from, ...center(towards([from.cx, from.cy], T0, lam)), w: from.w / (1 + a) };
+      const w = from.w / Math.pow(pushZoom(env, tg, from.w), a);
+      const to = { ...from, ...center(fit(towards([from.cx, from.cy], T0, lam), w)), w };
       return { from, to, path: (e) => lerpState(from, to, e) };
     }
     case 'pullOut': {
-      const to = start ? { ...start, ...center(towards([start.cx, start.cy], [B.cx, B.cy], 1)), w: Math.min(B.w, start.w * (1 + a)) } : baseState(B);
-      const from = start || tight(1 + a, towards([B.cx, B.cy], T0, lam));
+      const to = start ? { ...start, ...center(towards([start.cx, start.cy], [B.cx, B.cy], 1)), w: Math.min(B.w, start.w * Math.pow(PUSH_ZPANEL, a)) } : baseState(B);
+      const from = start || tight(Math.pow(pushZoom(env, tg, B.w), a), towards([B.cx, B.cy], T0, lam));
       return { from, to, path: (e) => lerpState(from, to, e) };
     }
     case 'truck':
@@ -269,17 +360,17 @@ function planShot(env, shot, start, k, lam, ctxLike) {
         path: (e) => {
           const yaw = horiz ? y0 + deg * e : y0;
           const pitch = horiz ? p0 : p0 + deg * e;
-          const pv = towards([B.cx, B.cy], pivotCenter(tg, yaw, pitch), lam);
+          const pv = fit(towards([B.cx, B.cy], pivotCenter(tg, yaw, pitch), lam), base.w);
           const c = start ? towards([start.cx, start.cy], pv, e) : pv;
           return { ...base, cx: c[0], cy: c[1], yaw, pitch };
         },
       };
     }
     case 'reveal': {
-      const to = start ? { ...start, ...center(towards([start.cx, start.cy], T0, lam)), w: Math.max(start.w, B.w) } : { ...baseState(B), ...center(towards([B.cx, B.cy], T0, lam)) };
+      const to = start ? { ...start, ...center(fit(towards([start.cx, start.cy], T0, lam), Math.max(start.w, B.w))), w: Math.max(start.w, B.w) } : { ...baseState(B), ...center(towards([B.cx, B.cy], T0, lam)) };
       let from = start;
       if (!from) {
-        const z = 1 + 0.8 * a;
+        const z = Math.pow(PUSH_ZPANEL, a);
         const w = B.w / z;
         const h = w / aspect;
         const bh = B.w / aspect;
@@ -299,13 +390,13 @@ function planShot(env, shot, start, k, lam, ctxLike) {
       const amount = clamp(0, 1, shot.dof ?? 0.6);
       return { from: base, path: (e) => ({ ...base, dof: { amount, focus: mix(f0, f1, e) } }) };
     }
-    case 'handheld':
-    case 'breathe': {
+    case 'handheld': {
+      // ruido de ±2 %·amount del ancho y ±0.4°·amount, con el zoom fijo que hace falta para no ver fuera del encuadre base
       const base = start || tight(zoom, towards([B.cx, B.cy], T0, lam));
-      const hand = move === 'handheld';
-      const A = (hand ? 0.02 : 0.006) * env.W * a;
-      const rot = hand ? 0.4 * a : 0;
-      const f = hand ? 0.55 : 0.15;
+      const A = 0.02 * env.W * a;
+      const rot = 0.4 * a;
+      const zc = 1 + (2.2 * A) / env.W + 1.9 * ((rot * Math.PI) / 180);
+      const f = 0.55;
       const ch = shot._i * 10;
       return {
         from: base,
@@ -315,21 +406,44 @@ function planShot(env, shot, start, k, lam, ctxLike) {
           dx: (base.dx || 0) + A * noise2(hr, ch + 1, lt, f),
           dy: (base.dy || 0) + A * noise2(hr, ch + 2, lt, f),
           drot: (base.drot || 0) + rot * noise2(hr, ch + 3, lt, f * 0.8),
-          dzoom: (base.dzoom || 1) * (hand ? 1 : 1 + 0.03 * a * 0.5 * (1 - Math.cos((2 * Math.PI * lt) / 4))),
+          dzoom: (base.dzoom || 1) * zc,
         }),
+      };
+    }
+    case 'breathe': {
+      // zoom lento de 1 a 1 + 8 %·amount (período 4 s) y una deriva que siempre cabe en lo que ese zoom recorta:
+      // nunca muestra nada que el encuadre base no mostrara
+      const base = start || tight(zoom, towards([B.cx, B.cy], T0, lam));
+      const peak = 0.08 * a;
+      const ch = shot._i * 10;
+      return {
+        from: base,
+        noisy: true,
+        path: (e, lt) => {
+          const z = 1 + peak * 0.5 * (1 - Math.cos((2 * Math.PI * lt) / 4));
+          const room = 0.7 * (z - 1);
+          return {
+            ...base,
+            dx: (base.dx || 0) + room * (env.W / 2) * noise2(hr, ch + 1, lt, 0.15),
+            dy: (base.dy || 0) + room * (env.H / 2) * noise2(hr, ch + 2, lt, 0.15),
+            dzoom: (base.dzoom || 1) * z,
+          };
+        },
       };
     }
   }
   return { from: S0, path: () => S0 };
 }
 
-// encuadre agrandado o veces (w / o) en todo el tramo
-function overscan(plan, o) {
+// encuadre agrandado o veces (w / o) en todo el tramo; con keepText el centro se vuelve a correr para los textos
+function overscan(plan, o, fit = null) {
   if (!(o > 1)) return plan;
-  return { ...plan, from: plan.from && { ...plan.from, w: plan.from.w / o }, path: (e, lt) => {
-    const st = plan.path(e, lt);
-    return { ...st, w: st.w / o };
-  } };
+  const scale = (st) => {
+    const w = st.w / o;
+    const c = fit ? fit([st.cx, st.cy], w) : [st.cx, st.cy];
+    return { ...st, w, cx: c[0], cy: c[1] };
+  };
+  return { ...plan, from: plan.from && scale(plan.from), path: (e, lt) => scale(plan.path(e, lt)) };
 }
 
 // estado → resultado de cámara (misma interfaz que las cámaras 2D + canales 3D)
@@ -342,6 +456,9 @@ function stateToResult(st) {
 }
 
 // Arma los tramos con sus límites. Devuelve { shots, warnings, limits }.
+// Prioridades (de más a menos importante): 1) no ver huecos (bounds); 2) keepText: los textos visibles enteros
+// dentro del cuadro con margen; 3) el amount pedido; 4) centrar el objetivo. Primero se corre el encuadre, después
+// se limita amount; si el texto no entra ni sin moverse, se avisa y se sigue sin keepText para ese tramo.
 export function planMove3d(ctx) {
   const env = sceneEnv(ctx);
   const warnings = [];
@@ -351,7 +468,11 @@ export function planMove3d(ctx) {
   };
   const p = ctx.params;
   const dur = ctx.duration || 0;
-  const raw = Array.isArray(p.shots) && p.shots.length ? p.shots : [{ at: 0, dur, move: p.move, target: p.target, amount: p.amount, direction: p.direction, ease: p.ease, zoom: p.zoom, from: p.from, to: p.to, dof: p.dof }];
+  const bounds = BOUNDS.includes(p.bounds) ? p.bounds : 'art';
+  if (p.bounds && !BOUNDS.includes(p.bounds)) warn(`bounds "${p.bounds}" desconocido (${BOUNDS.join('|')}); se usa 'art'`);
+  const keepText = p.keepText !== false;
+  const chained = Array.isArray(p.shots) && p.shots.length;
+  const raw = chained ? p.shots : [{ at: 0, dur, move: p.move, target: p.target, amount: p.amount, direction: p.direction, ease: p.ease, zoom: p.zoom, from: p.from, to: p.to, dof: p.dof }];
   const shots = raw
     .map((s, i) => ({
       ...s,
@@ -361,8 +482,8 @@ export function planMove3d(ctx) {
       move: MOVES.includes(s.move) ? s.move : (warn(`move desconocido "${s.move}" (${MOVES.join('|')}); se usa pushIn`), 'pushIn'),
       target: s.target !== undefined ? s.target : p.target,
       ease: s.ease || p.ease || 'easeInOut',
-      zoom: s.zoom ?? (Array.isArray(p.shots) && p.shots.length ? undefined : p.zoom ?? undefined),
-      direction: s.direction ?? (Array.isArray(p.shots) && p.shots.length ? undefined : p.direction),
+      zoom: s.zoom ?? (chained ? undefined : p.zoom ?? undefined),
+      direction: s.direction ?? (chained ? undefined : p.direction),
       amount: s.amount ?? p.amount ?? 0.5,
     }))
     .sort((a, b) => a.at - b.at);
@@ -375,14 +496,14 @@ export function planMove3d(ctx) {
     sh._tg = resolveTarget(env, sh.target, warn);
     if (sh.zoom == null) delete sh.zoom;
     const ease = easing(sh.ease, sh.dur || 1);
-    // tiempos de muestra (locales al tramo): uniformes, y a los fps del proyecto donde hay efectos de cámara
-    // (shake, dutch, dolly de otros clips) que se suman encima: el límite los incluye
-    // muestras { lt (local al tramo), t (de la escena) }. El estado final del tramo tiene que aguantar también
-    // los efectos que vienen DESPUÉS (el tramo siguiente arranca de ahí y move3d sostiene su vista al final).
+    const label = chained ? `shot ${sh._i + 1} (${sh.move})` : sh.move;
+    const t0 = vstart + sh.at;
+    // muestras { lt (local al tramo), t (de la escena) }: densas (≤ 30 fps) y a los fps del proyecto donde hay
+    // efectos de cámara (shake, dutch, dolly de otros clips) que se suman encima: el límite los incluye. El estado
+    // final del tramo tiene que aguantar también los efectos que vienen DESPUÉS (el tramo siguiente arranca de ahí
+    // y move3d sostiene su vista al final).
     const lts = [];
     {
-      // denso (≤ 30 fps) para que ningún instante entre muestras quede fuera del límite
-      const t0 = vstart + sh.at;
       const n = Math.max(16, Math.ceil(sh.dur * Math.min(30, ctx.fps || 24)));
       for (let i = 0; i <= n; i++) lts.push({ lt: (sh.dur * i) / n, t: t0 + (sh.dur * i) / n });
       const step = 1 / Math.min(60, ctx.fps || 24);
@@ -392,13 +513,39 @@ export function planMove3d(ctx) {
         for (let t = a; t < b; t += step) lts.push({ lt: Math.min(sh.dur, t - t0), t });
       }
     }
-    const marginOf = (k, lam, o = over) => {
-      const plan = overscan(planShot(env, sh, prevEnd, k, lam, ctx), o);
-      let mg = Infinity;
-      for (const { lt, t } of lts) {
+    // keepText: margen pedido por texto = min(24 px, el que tenía con la cámara al arrancar el tramo); un texto que
+    // ya arranca cortado no se exige (se avisa)
+    const reqs = new Map();
+    if (keepText) {
+      const base = sh.move === 'breathe' || sh.move === 'handheld' ? TEXT_MARGIN_NOISY : TEXT_MARGIN;
+      const startCam = prevEnd ? stateToResult(prevEnd) : { view: framing(env, sh._tg.m) };
+      const cut = [];
+      for (const b of textBoxes(env, t0 + Math.min(sh.dur, 0.001), false)) {
+        const d = textSlack(b.corners, startCam, env.W, env.H);
+        if (d >= 0) reqs.set(b.id, Math.min(base, d));
+        else cut.push(b.id);
+      }
+      if (cut.length && textBoxes(env, t0 + sh.dur, true).some((b) => cut.includes(b.id))) warn(`${label}: ${cut.join(', ')} ya arranca cortado por el cuadro: keepText no lo exige en este tramo`);
+    }
+    const endTexts = keepText ? textBoxes(env, vstart + sh.at + sh.dur - 1e-3, true).filter((b) => reqs.has(b.id)) : [];
+    // textos visibles en cada muestra (no dependen de la cámara: están en el plano focal)
+    if (reqs.size) for (const s of lts) s.texts = textBoxes(env, s.t, true).filter((b) => reqs.has(b.id));
+    const fitAll = keepText ? makeFit(env, endTexts, (id) => reqs.get(id)) : null;
+    let useText = keepText && reqs.size > 0;
+    const planOf = (k, lam, o) => {
+      sh._fit = useText ? fitAll : null;
+      return overscan(planShot(env, sh, prevEnd, k, lam, ctx), o, sh._fit);
+    };
+    // ok(): sin huecos y (con keepText) los textos visibles enteros con su margen. Corta en la primera falla.
+    // Los huecos se miden con los efectos de cámara encima (shake, dutch…); los textos con la cámara de move3d sola
+    // (una sacudida que asoma un cartel medio segundo no es un encuadre).
+    const ok = (k, lam, o = over) => {
+      const plan = planOf(k, lam, o);
+      for (const { lt, t, texts } of lts) {
         const st = plan.path(ease(sh.dur > 0 ? lt / sh.dur : 1), lt);
-        if (st._infeasible) return -1e9;
+        if (st._infeasible) return false;
         const camera = stateToResult(st);
+        if (useText && texts?.length) for (const b of texts) if (textSlack(b.corners, camera, env.W, env.H) - reqs.get(b.id) < SAFE_PX) return false;
         if (effects.length) {
           const fx = composeCamera(camera.view, cameraResultsAt(effects, t));
           camera.dx += fx.dx;
@@ -406,38 +553,66 @@ export function planMove3d(ctx) {
           camera.drot += fx.drot;
           camera.dzoom *= fx.dzoom;
         }
-        const r = safeView({ W: env.W, H: env.H, stage: env.stage, panels: env.panels, camera, t, fullBleed: env.fullBleed });
-        if (r.skipped) continue;
-        mg = Math.min(mg, r.margin);
+        const r = safeView({ W: env.W, H: env.H, stage: env.stage, panels: env.panels, camera, t, fullBleed: env.fullBleed, bounds, stageColor: env.stageColor });
+        if (!r.skipped && r.margin < SAFE_PX) return false;
+      }
+      return true;
+    };
+    const marginOf = (k, lam, o) => {
+      const plan = planOf(k, lam, o);
+      let mg = Infinity;
+      for (const { lt, t } of lts) {
+        const camera = stateToResult(plan.path(ease(sh.dur > 0 ? lt / sh.dur : 1), lt));
+        if (effects.length) {
+          const fx = composeCamera(camera.view, cameraResultsAt(effects, t));
+          camera.dx += fx.dx;
+          camera.dy += fx.dy;
+          camera.drot += fx.drot;
+          camera.dzoom *= fx.dzoom;
+        }
+        const r = safeView({ W: env.W, H: env.H, stage: env.stage, panels: env.panels, camera, t, fullBleed: env.fullBleed, bounds, stageColor: env.stageColor });
+        if (!r.skipped) mg = Math.min(mg, r.margin);
       }
       return mg;
     };
-    const ok = (k, lam, o = over) => marginOf(k, lam, o) >= SAFE_PX;
     let over = 1;
     let k = 1;
     let lam = 1;
-    const label = Array.isArray(p.shots) && p.shots.length ? `shot ${sh._i + 1} (${sh.move})` : sh.move;
+    const bisect = (f) => {
+      let lo = 0;
+      let hi = 1;
+      for (let i = 0; i < 14; i++) {
+        const mid = (lo + hi) / 2;
+        if (f(mid)) lo = mid;
+        else hi = mid;
+      }
+      return lo;
+    };
+    // ¿el límite lo pone el texto (sin keepText habría entrado)?
+    const byText = (kk, l) => {
+      if (!useText) return false;
+      useText = false;
+      const r = ok(kk, l);
+      useText = true;
+      return r;
+    };
+    const textIds = () => endTexts.map((b) => b.id).join(', ') || 'los textos';
+    const decenter = (l) => {
+      lam = l;
+      if (sh._tg.layer || sh.target) warn(`${label}: encuadre corrido para ${byText(1, 1) ? `que entre ${textIds()} (keepText)` : 'no ver bordes'} (objetivo centrado al ${Math.round(lam * 100)} %)`);
+    };
+    const limit = (l) => {
+      k = bisect((kk) => ok(kk, l));
+      const applied = +((sh.amount ?? 0.5) * k).toFixed(2);
+      limits.push({ shot: sh._i, move: sh.move, requested: sh.amount, applied });
+      warn(`${label}: amount limitado a ${applied} (pedido ${sh.amount}) para ${byText(1, l) ? `que entre ${textIds()} (keepText)` : 'no ver bordes'}`);
+    };
+    // si el texto no entra ni sin moverse (el encuadre de partida ya lo corta con el margen pedido), keepText cede
+    if (useText && !ok(0, 1) && !ok(0, 0) && (byText(0, 1) || byText(0, 0))) {
+      warn(`${label}: ${textIds()} no entra entero ni sin mover la cámara: keepText no se puede cumplir en este tramo`);
+      useText = false;
+    }
     if (!ok(1, 1)) {
-      const bisect = (f) => {
-        let lo = 0;
-        let hi = 1;
-        for (let i = 0; i < 14; i++) {
-          const mid = (lo + hi) / 2;
-          if (f(mid)) lo = mid;
-          else hi = mid;
-        }
-        return lo;
-      };
-      const decenter = (l) => {
-        lam = l;
-        if (sh._tg.layer || sh.target) warn(`${label}: encuadre corrido para no ver bordes (objetivo centrado al ${Math.round(lam * 100)} %)`);
-      };
-      const limit = (l) => {
-        k = bisect((kk) => ok(kk, l));
-        const applied = +((sh.amount ?? 0.5) * k).toFixed(2);
-        limits.push({ shot: sh._i, move: sh.move, requested: sh.amount, applied });
-        warn(`${label}: amount limitado a ${applied} (pedido ${sh.amount}) para no ver bordes`);
-      };
       // pushIn/pullOut/reveal: el zoom es el pedido, así que primero se corre el encuadre (objetivo cerca de un
       // borde) y después se limita amount. El resto encuadra el objetivo: primero se limita amount.
       const centerFirst = ['pushIn', 'pullOut', 'reveal'].includes(sh.move);
@@ -463,14 +638,37 @@ export function planMove3d(ctx) {
           over = hi;
           warn(`${label}: encuadre agrandado ×${over.toFixed(3)} para no ver bordes (el de partida mostraba ${fmtPx(before)}, p. ej. por un shake)`);
           if (!ok(1, lam)) limit(lam);
-        } else warn(`${label}: el encuadre de partida ya muestra bordes (${fmtPx(before)}); amount sin limitar`);
+        } else {
+          // no hay arreglo: queda el movimiento pedido, con el centrado (objetivo o viñeta) que menos hueco muestra
+          if (centerFirst && marginOf(1, 1, 1) >= marginOf(1, 0, 1)) lam = 1;
+          if (before < SAFE_PX) warn(`${label}: el encuadre de partida ya muestra bordes (${fmtPx(before)}, p. ej. por un shake) y agrandarlo no alcanza sin cortar ${useText ? textIds() : 'nada'}; amount sin limitar`);
+          else warn(`${label}: sin encuadre que cumpla a la vez bordes y textos; amount sin limitar`);
+        }
       }
     }
-    sh._plan = overscan(planShot(env, sh, prevEnd, k, lam, ctx), over);
+    sh._plan = planOf(k, lam, over);
     sh._ease = ease;
     sh._k = k;
+    // keepText corrió el encuadre: cuánto (px de página) respecto del mismo tramo sin textos
+    let shift = 0;
+    if (useText && fitAll) {
+      sh._fit = null;
+      const bare = overscan(planShot(env, sh, prevEnd, k, lam, ctx), over).path(1, sh.dur);
+      const fitted = sh._plan.path(1, sh.dur);
+      shift = Math.hypot(bare.cx - fitted.cx, bare.cy - fitted.cy);
+    }
     prevEnd = sh._plan.path(1, sh.dur);
     delete prevEnd._infeasible;
+    if (shift > 2) warn(`${label}: encuadre corrido ${Math.round(shift)} px de página para que ${textIds()} entre entero (keepText)`);
+    // el texto le ganó al objetivo: avisar si el objetivo quedó lejos del centro (o fuera de cuadro)
+    if (useText && endTexts.length && (sh._tg.layer || sh.target) && !['breathe', 'handheld', 'rackFocus'].includes(sh.move)) {
+      const A = cameraAffine({ dx: 0, dy: 0, drot: 0, dzoom: 1, ...stateToResult(prevEnd) }, env.W, env.H);
+      const [u, v] = ap(A, sh._tg.page[0], sh._tg.page[1]);
+      const off = Math.hypot(u - env.W / 2, v - env.H / 2);
+      if (u < 0.15 * env.W || u > 0.85 * env.W || v < 0.15 * env.H || v > 0.85 * env.H)
+        warn(`${label}: ${sh.target || 'el objetivo'} y ${textIds()} no entran juntos cómodos: se prioriza el texto (el objetivo queda a ${Math.round(off)} px del centro del cuadro)`);
+    }
+    delete sh._fit;
   }
   const initial = shots.length ? shots[0]._plan.from || shots[0]._plan.path(0, 0) : null;
   return { env, shots, warnings, limits, initial };
@@ -499,13 +697,15 @@ export const move3d = {
   params: [
     { key: 'move', label: 'Movimiento', type: 'select', options: MOVES, default: 'pushIn' },
     { key: 'target', label: 'Objetivo (@tag, layer:id, panel:id, region:[x,y,w,h], focus; vacío = la viñeta)', type: 'text', default: null },
-    { key: 'amount', label: 'Cantidad 0..1 (del recorrido nominal; se limita para no ver bordes)', type: 'number', min: 0, max: 1, step: 0.01, default: 0.5 },
+    { key: 'amount', label: 'Cantidad 0..1 (del recorrido nominal; se limita para no ver huecos ni cortar textos)', type: 'number', min: 0, max: 1, step: 0.01, default: 0.5 },
     { key: 'direction', label: 'Dirección', type: 'select', options: DIRS, default: 'auto' },
     { key: 'ease', label: 'Ease', type: 'ease', default: 'easeInOut' },
     { key: 'zoom', label: 'Encuadre base (zoom ≥ 1; vacío = el del movimiento)', type: 'number', min: 1, max: 3, step: 0.01, default: null },
     { key: 'from', label: 'rackFocus: capa de foco inicial (@tag, layer:id o depth)', type: 'text', default: null },
     { key: 'to', label: 'rackFocus: capa de foco final (vacío = el objetivo)', type: 'text', default: null },
     { key: 'dof', label: 'rackFocus: intensidad del desenfoque', type: 'number', min: 0, max: 1, step: 0.01, default: 0.6 },
+    { key: 'bounds', label: "Qué es hueco: art (vacío o cortes; el marco negro de la página no), panel (no salir de la viñeta), page (no salir de la página)", type: 'select', options: BOUNDS, default: 'art' },
+    { key: 'keepText', label: 'Mantener enteros los textos visibles (24 px de margen)', type: 'bool', default: true },
     { key: 'shots', label: 'Encadenado [{at, dur, move, target, amount, direction, ease, zoom}]', type: 'json', default: null },
   ],
   build(ctx) {
@@ -533,7 +733,7 @@ export function sceneCamera(scene, entry, presets, { warn } = {}) {
   const v = entry.variant;
   const W = scene.meta.width;
   const H = scene.meta.height;
-  const stage = { w: v.stage?.w || W, h: v.stage?.h || H };
+  const stage = { w: v.stage?.w || W, h: v.stage?.h || H, background: v.stage?.background || scene.meta.background || '#fff' };
   const clips = activeClips(v);
   const panelRects = {};
   const panels = [];
@@ -606,6 +806,15 @@ export function checkGaps(scene, presets, { fps = 4 } = {}) {
     for (const id of sc.skipped) warnings.push(`${sid}/${id}: cámara custom, no se evalúa sin navegador`);
     const models = sc.panels.map((pc) => panelModel({ id: pc.id, params: pc.params, asset: scene.assets?.[pc.params.asset] || null, start: pc.start, duration: pc.duration, stage: sc.stage, W: sc.W, H: sc.H }));
     const fullBleed = isFullBleed({ W: sc.W, H: sc.H, stage: sc.stage, panels: models });
+    // misma definición de hueco que el limitador: la de la cámara move3d de la escena (default 'art')
+    const m3 = sc.cams.find((r) => r.def?.id === 'move3d');
+    const bounds = BOUNDS.includes(m3?.variant.params?.bounds) ? m3.variant.params.bounds : 'art';
+    if (bounds === 'art') {
+      for (const m of models) {
+        // videos: `comic tags` no los mide (el marco puede cambiar cuadro a cuadro); quedan como 'panel'
+        if (m.asset && !hasFrameData(m)) warnings.push(`${sid}/${m.id}: el asset ${m.p.asset} no tiene datos del marco (${m.layers ? 'capas sólidas/alfa' : 'edges'}): mirar fuera de la viñeta cuenta como hueco. ${m.asset.type === 'video' ? 'Los videos no se miden (se evalúa como bounds \'panel\')' : '`comic tags` los mide'}`);
+      }
+    }
     const open = new Map(); // clave → tramo abierto
     // textos/globos cortados: solo si dura ≥ 0.5 s (un paneo que los cruza no es un error)
     const minText = Math.max(1, Math.ceil(0.5 * fps - 1e-9));
@@ -620,7 +829,7 @@ export function checkGaps(scene, presets, { fps = 4 } = {}) {
     for (let i = 0; i < n; i++) {
       const t = i / fps;
       const cam = sc.at(t);
-      const r = safeView({ W: sc.W, H: sc.H, stage: sc.stage, panels: models, camera: cam, t, fullBleed, texts: true });
+      const r = safeView({ W: sc.W, H: sc.H, stage: sc.stage, panels: models, camera: cam, t, fullBleed, texts: true, bounds, stageColor: sc.stage.background });
       const found = [...r.issues];
       // globos DOM (px de página): cortados por el cuadro mientras se ven
       const A = cameraAffine(cam, sc.W, sc.H);

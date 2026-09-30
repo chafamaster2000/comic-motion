@@ -9,7 +9,7 @@ import { runClaude } from './claude.js';
 import { targetContext, writeCatalog } from './generator.js';
 import { layersSummary } from './recipes/geometry.js';
 import { listRecipes } from './recipes/index.js';
-import { findTarget, activeVariant } from './shared/scene.js';
+import { findTarget, activeVariant, assetsForPrompt } from './shared/scene.js';
 
 const OPEN = ['thinking', 'question', 'done', 'error'];
 
@@ -142,7 +142,7 @@ export function createGuides(project, { queue, onChange }) {
   }
 
   function buildContext(scene, target) {
-    const base = { meta: scene.meta, assets: scene.assets };
+    const base = { meta: scene.meta, assets: assetsForPrompt(scene.assets) };
     if (!target) {
       return {
         ...base,

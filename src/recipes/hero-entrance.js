@@ -1,12 +1,13 @@
 // Entrada del héroe: el personaje entra en z (slam desde la cámara), y en el impacto sacudida, flash y
-// onomatopeya donde menos pisa textos y personajes, cerca del héroe. La cámara se acerca un poco después del golpe.
+// onomatopeya donde menos pisa textos y personajes, cerca del héroe. Después del golpe la cámara se acerca fuerte
+// al héroe (pushIn amount 0.8) sin cortar los carteles (keepText corre el encuadre si hace falta).
 import { clip, move3d, onoSpot, round } from './common.js';
 
 export default {
   id: 'hero-entrance',
   label: 'Entrada del héroe',
   mood: 'acción / presentación',
-  description: 'personaje (@hero o --target) entra con slam en z; en el impacto shake + flash + ono; push-in corto',
+  description: 'personaje (@hero o --target) entra con slam en z; en el impacto shake + flash + ono; push-in fuerte que mantiene los textos',
   expand(ctx) {
     const { g, T0, D } = ctx;
     const ref = ctx.target || '@hero';
@@ -21,7 +22,7 @@ export default {
       clip('flash', 'fx', 'Flash', 'flash', Math.max(0, ti - 0.03), 0.3, { max: 0.6, peak: 0.1 }),
       clip('ono', 'ono', ctx.opts.text || '¡BAM!', 'ono', ti, Math.min(1.4, D - slam), { text: ctx.opts.text || '¡BAM!', at: onoSpot(g, box, size), size, rotate: -10, anim: 'slam' }),
     ];
-    if (ctx.replaceCamera || !ctx.hasViewCamera) clips.push(move3d('cam', 'Tras el impacto (push-in)', ti, Math.max(0.5, D - slam), { move: 'pushIn', target: ref, amount: 0.2, ease: 'easeOut' }));
+    if (ctx.replaceCamera || !ctx.hasViewCamera) clips.push(move3d('cam', 'Tras el impacto (push-in)', ti, Math.max(0.5, D - slam), { move: 'pushIn', target: ref, amount: 0.8, ease: 'easeOut' }));
     const layers = { [hero.id]: { at: round(T0 - ctx.panelStart), enter: { preset: 'slam', duration: slam, ease: 'springHard' } } };
     return { summary: `hero-entrance: ${hero.id} entra con slam a ${round(T0, 2)}s, impacto a ${round(ti, 2)}s (shake + flash + ono)`, clips, layers };
   },

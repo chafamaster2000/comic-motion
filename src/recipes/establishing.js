@@ -6,11 +6,11 @@ export default {
   id: 'establishing',
   label: 'Plano de ubicación',
   mood: 'épico / abrir escena',
-  description: 'pull-out lento (move3d) hacia @bg-main, deriva suave del fondo, textos con pop en orden de lectura',
+  description: 'pull-out lento y amplio (move3d, amount 0.7) desde @bg-main, deriva suave del fondo, textos con pop en orden de lectura (keepText)',
   expand(ctx) {
     const { g, T0, D } = ctx;
     const target = ctx.target || (g.ref('@bg-main') ? '@bg-main' : null);
-    const clips = [move3d('cam', 'Ubicación (pull-out)', T0, D, { move: 'pullOut', target, amount: 0.4, ease: 'easeInOut' })];
+    const clips = [move3d('cam', 'Ubicación (pull-out)', T0, D, { move: 'pullOut', target, amount: 0.7, ease: 'easeInOut' })];
     const layers = {};
     const notes = [];
     // deriva del fondo solo si no rompe nada: un único fondo local, sin divisores ni personajes recortados contra él

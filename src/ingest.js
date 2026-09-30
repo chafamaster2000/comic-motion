@@ -5,6 +5,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import sharp from 'sharp';
+import { annotateAssetBounds } from './pixel-bounds.js';
 import { roleFromName, ROLE_DEPTH, GLOBAL_BG_DEPTH, CHARACTER_DEPTH_RANGE, resolveLayers, wordsOf, readingOrder } from './player/layers.js';
 
 const IMG = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.avif', '.tif', '.tiff'];
@@ -60,6 +61,7 @@ export async function ingest(project, scene, files, { log = console.log } = {}) 
       const m = await sharp(dest).metadata();
       asset.w = m.width;
       asset.h = m.height;
+      await annotateAssetBounds(project.dir, asset); // canaleta/marco de la imagen (límites de cámara)
     } else {
       const info = probe(dest);
       Object.assign(asset, { w: info.w, h: info.h, duration: +info.duration.toFixed(3) });
@@ -385,6 +387,7 @@ export async function retagLayersAsset(project, asset, { reset = false } = {}) {
     if (!['character', 'background'].includes(l.role)) continue;
     stats[l.id] = alphaStats(await canvasAlpha(path.join(project.dir, l.file), l.x, l.y, W, H), W, H);
   }
+  await annotateAssetBounds(project.dir, asset); // de paso: datos de límites de cámara (alfa, capas sólidas)
   return applyLayerTags(asset, computeLayerTags(asset.layers, W, H, stats), { reset });
 }
 
@@ -659,6 +662,7 @@ export async function ingestLayers(project, scene, layoutFile, { exclude = [], m
       source: { layout: path.resolve(layoutFile), scene: sc.scene, psd: doc.source || null, preview: sc.preview ? path.join(srcDir, sc.preview) : null },
     };
     for (const k of Object.keys(asset)) if (asset[k] === undefined) delete asset[k];
+    await annotateAssetBounds(project.dir, asset); // bbox del alfa y capas de un solo color (límites de cámara)
     // alias semánticos (@hero, @bg-main, …); conserva los tags editados a mano de una ingesta anterior
     const tagInfo = applyLayerTags(asset, computeLayerTags(asset.layers, W, H, Object.fromEntries(L.map((l) => [l.id, { area: l.area, cx: l.cx, cy: l.cy }]))), { prev: prev?.type === 'layers' ? prev : null });
     const tagsOf = Object.fromEntries(tagInfo.map((t) => [t.id, t]));

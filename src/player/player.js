@@ -120,7 +120,8 @@ export function createPlayer(root, opts) {
     let uidN = 0;
     const scenes = layout.map((entry, zi) => {
       const v = entry.variant;
-      const stage = { w: v.stage?.w || W(), h: v.stage?.h || H() };
+      // background: color del escenario (move3d lo compara con el marco de la página para decidir qué es hueco)
+      const stage = { w: v.stage?.w || W(), h: v.stage?.h || H(), background: v.stage?.background || scene.meta.background || '#fff' };
       const sceneEl = div('cm-scene');
       sceneEl.style.zIndex = String(2 * zi + 2);
       sceneEl.style.background = v.stage?.background || scene.meta.background || '#fff';

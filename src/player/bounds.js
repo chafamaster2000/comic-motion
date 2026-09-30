@@ -231,7 +231,10 @@ export function coverage(region, shapes, samples = null) {
   for (const P of pts) {
     let best = null;
     for (const sh of shapes) {
-      const s = slack(ap(sh.toLocal, P[0], P[1]), sh.rect, sh.k);
+      const pl = ap(sh.toLocal, P[0], P[1]);
+      let s = slack(pl, sh.rect, sh.k);
+      // dentro del bbox pero en una celda sin dibujo (grid): no cubre (hueco de ~media celda)
+      if (s.px > 0 && sh.layer && !gridHas(sh.layer, pl[0], pl[1])) s = { px: -0.5 * sh.layer.grid.cell * sh.k, side: s.side };
       if (!best || s.px > best.px) best = { ...s, id: sh.id };
     }
     if (!best) best = { px: -Infinity, side: null, id: null };
@@ -258,7 +261,53 @@ export function sideMargins(region, sh) {
 }
 
 // ---------- vista segura de una viñeta ----------
-// Planos que cubren (fondos) de una viñeta por capas en el tiempo local t, como formas del cuadro.
+// Rect de una capa para los límites: el bbox del alfa real si se midió (`alpha`, lo escriben `comic layers` y
+// `comic tags`), si no el bbox de la capa (un PNG con mucho margen transparente puede dar un falso "cubierto").
+export const layerRect = (r) => (Array.isArray(r.alpha) && r.alpha.length === 4 ? r.alpha : [r.x, r.y, r.w, r.h]);
+
+// Grilla gruesa del alfa (`grid`, sobre layerRect): ¿hay dibujo en el punto local (u, v)? Sin grilla: sí.
+function decodeBits(b64) {
+  if (typeof atob === 'function') return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  return new Uint8Array(Buffer.from(b64, 'base64'));
+}
+export function gridHas(r, u, v) {
+  const g = r.grid;
+  if (!g || !g.bits) return true;
+  const hl = r.hull;
+  if (hl && hl.n && !r._hull) {
+    const i16 = (b) => {
+      const u8 = decodeBits(b);
+      return new Int16Array(u8.buffer, u8.byteOffset, u8.byteLength >> 1);
+    };
+    Object.defineProperty(r, '_hull', { value: { n: hl.n, rows: typeof hl.rows === 'string' ? i16(hl.rows) : hl.rows, cols: typeof hl.cols === 'string' ? i16(hl.cols) : hl.cols }, enumerable: false });
+  }
+  if (r._hull) {
+    const hl = r._hull;
+    const [hx, hy, hw, hh] = layerRect(r);
+    const rb = Math.floor(((v - hy) * hl.n) / hh);
+    const cb = Math.floor(((u - hx) * hl.n) / hw);
+    if (rb >= 0 && rb < hl.n) {
+      const a = hl.rows[rb * 2];
+      if (a < 0 || u - hx < a || u - hx > hl.rows[rb * 2 + 1]) return false;
+    }
+    if (cb >= 0 && cb < hl.n) {
+      const a = hl.cols[cb * 2];
+      if (a < 0 || v - hy < a || v - hy > hl.cols[cb * 2 + 1]) return false;
+    }
+  }
+  if (!r._bits) Object.defineProperty(r, '_bits', { value: decodeBits(g.bits), enumerable: false });
+  const [x, y] = layerRect(r);
+  const cx = Math.floor((u - x) / g.cell);
+  const cy = Math.floor((v - y) / g.cell);
+  if (cx < 0 || cy < 0 || cx >= g.cols || cy >= g.rows) return false;
+  const c = cy * g.cols + cx;
+  return !!(r._bits[c >> 3] & (1 << (c & 7)));
+}
+
+// Planos de una viñeta por capas en el tiempo local t, como formas del cuadro:
+//   shapes: fondos que cubren (rol background, opacidad ≥ 0.5); texts: textos visibles; all: toda capa visible
+//   (orden de dibujo, para ver qué corta el borde de la caja). Cada texto trae `rest`: sus esquinas en el cuadro
+//   sin la animación de entrada/salida (keepText mide el texto ya asentado, no el pop).
 // cam: afín página → cuadro. eye3d: { dist, orbit, dof } extra de la cámara (move3d).
 export function layerShapes({ W, H, m, cam, t, eye3d = {} }) {
   const L = panelLayoutAt(m, t);
@@ -272,18 +321,28 @@ export function layerShapes({ W, H, m, cam, t, eye3d = {} }) {
   const sA = Math.sqrt(Math.abs(det(A)));
   const shapes = [];
   const texts = [];
+  const all = [];
   for (const r of vis) {
     const st = layerState(r, t, m.duration);
     if (!st.visible) continue;
-    const toFocal = mul(planeToFocal(eye, m.rest, r.Z), st.m); // local de la capa → plano focal
+    const plane = planeToFocal(eye, m.rest, r.Z);
+    const toFocal = mul(plane, st.m); // local de la capa → plano focal
     const toFrame = mul(A, toFocal);
     const k = sA * Math.sqrt(Math.abs(det(toFocal)));
-    const sh = { id: r.id, role: r.role, Z: r.Z, rect: [r.x, r.y, r.w, r.h], toFrame, toLocal: inv(toFrame), k, opacity: st.opacity, settled: layerSettled(r, t, m.duration), at: r.at || 0, since: t - (r.at || 0) };
+    const rect = layerRect(r);
+    const sh = { id: r.id, role: r.role, Z: r.Z, rect, toFrame, toLocal: inv(toFrame), k, opacity: st.opacity, solid: r.solid || null, layer: r.grid ? r : null, settled: layerSettled(r, t, m.duration), at: r.at || 0, since: t - (r.at || 0) };
     if (r.role === 'background' && st.opacity >= 0.5) shapes.push(sh);
-    if (r.role === 'text') texts.push(sh);
+    if (r.role === 'text') {
+      const still = layerState({ ...r, enter: null, exit: null }, t, m.duration);
+      const Mr = mul(A, mul(plane, still.m));
+      sh.rest = rectCorners(rect).map(([x, y]) => ap(Mr, x, y));
+      texts.push(sh);
+    }
+    if (st.opacity > 0.02) all.push(sh);
   }
-  return { shapes, texts, A, Mbox, eye, L };
+  return { shapes, texts, all, A, Mbox, eye, L };
 }
+const rectCorners = ([x, y, w, h]) => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
 
 // la capa ya terminó de entrar (y no está saliendo): recién ahí un texto cortado es un error
 function layerSettled(r, t, dur) {
@@ -302,44 +361,261 @@ export function boxRegion({ W, H, m, cam }) {
   return clipPoly(poly, [0, 0, W, H]);
 }
 
+// ---------- qué cuenta como hueco (bounds) ----------
+// 'art'   (default) solo es hueco lo que se ve roto: vacío/transparencia dentro de la caja (los fondos no cubren)
+//         o, fuera de la caja, el corte recto de algo dibujado. Mirar fuera de la viñeta NO es hueco si lo que
+//         toca ese borde de la caja es el marco de la propia página: una capa sólida (`solid`) o la franja pareja
+//         de una imagen plana (`edges`) del MISMO color que el fondo del escenario (stage.background /
+//         meta.background). Los lados de la caja que se ven en reposo son diseño (página con varias viñetas) y no
+//         cuentan. Sin datos de color (`comic tags` los mide) cae a 'panel' en esos lados.
+// 'panel' la vista no sale del rect de las viñetas en pantalla (su unión).
+// 'page'  la vista no sale de la página (stage).
+// En los tres, en una viñeta por capas los fondos tienen que cubrir la parte visible de la caja.
+export const BOUNDS = ['art', 'panel', 'page'];
+
+// color CSS simple → [r,g,b] (#rgb, #rrggbb, black/white); null si no se entiende
+export function parseColor(c) {
+  if (typeof c !== 'string') return null;
+  const s = c.trim().toLowerCase();
+  if (s === 'black') return [0, 0, 0];
+  if (s === 'white') return [255, 255, 255];
+  let m = /^#([0-9a-f]{3})$/.exec(s);
+  if (m) return [...m[1]].map((h) => parseInt(h + h, 16));
+  m = /^#([0-9a-f]{6})([0-9a-f]{2})?$/.exec(s);
+  if (m) return [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16));
+  return null;
+}
+export function sameColor(a, b, tol = 24) {
+  const x = parseColor(a);
+  const y = parseColor(b);
+  return !!(x && y) && Math.abs(x[0] - y[0]) <= tol && Math.abs(x[1] - y[1]) <= tol && Math.abs(x[2] - y[2]) <= tol;
+}
+
+// distancia de P hacia adentro del cuadro (negativa = afuera)
+const inFrame = (P, W, H) => Math.min(P[0], W - P[0], P[1], H - P[1]);
+// cuánto se ve desde P hacia afuera (dirección n unitaria) hasta el borde del cuadro
+function rayToFrame(P, n, W, H) {
+  let s = Infinity;
+  if (n[0] > 1e-9) s = Math.min(s, (W - P[0]) / n[0]);
+  if (n[0] < -1e-9) s = Math.min(s, -P[0] / n[0]);
+  if (n[1] > 1e-9) s = Math.min(s, (H - P[1]) / n[1]);
+  if (n[1] < -1e-9) s = Math.min(s, -P[1] / n[1]);
+  return Number.isFinite(s) ? Math.max(0, s) : 0;
+}
+const BOX_SIDES = [
+  ['top', 0, 1, [0, -1]],
+  ['right', 1, 2, [1, 0]],
+  ['bottom', 2, 3, [0, 1]],
+  ['left', 3, 0, [-1, 0]],
+];
+
+// Lados de la caja de una viñeta que NO se ven con la vista por defecto (se tapan con el borde del cuadro): solo
+// esos pueden ser un "corte" al mirar fuera. Los que se ven en reposo son el diseño de la página.
+function hiddenSides(m, { W, H, stage }) {
+  if (m._hidden) return m._hidden;
+  const cam = cameraAffine({ view: defaultView(stage, W, H) }, W, H);
+  const M = mul(cam, boxToPage(m));
+  const [iw, ih] = m.inner;
+  const c = [[0, 0], [iw, 0], [iw, ih], [0, ih]].map(([x, y]) => ap(M, x, y));
+  m._hidden = BOX_SIDES.filter(([, i, j]) => {
+    const pts = [c[i], c[j], [(c[i][0] + c[j][0]) / 2, (c[i][1] + c[j][1]) / 2]];
+    return pts.every((P) => inFrame(P, W, H) <= 1);
+  }).map((s) => s[0]);
+  return m._hidden;
+}
+
+// ¿El punto (px de la imagen) cae en la franja pareja (marco) del borde más cercano de una imagen plana?
+export function inEdgeBand(a, u, v) {
+  const e = a.edges;
+  if (!e) return false;
+  // distancia a cada borde y posición a lo largo de ese borde (0..1)
+  const sides = [[u, v / a.h], [v, u / a.w], [a.w - u, v / a.h], [a.h - v, u / a.w]];
+  let best = 0;
+  for (let i = 1; i < 4; i++) if (sides[i][0] < sides[best][0]) best = i;
+  const [dist, along] = sides[best];
+  if (dist < 0) return true; // fuera de la imagen: no hay dibujo que cortar
+  let depth = e.band?.[best] ?? 0;
+  if (e.bands && e.n) {
+    if (!a._bands) Object.defineProperty(a, '_bands', { value: (() => {
+      const u8 = decodeBits(e.bands);
+      return new Int16Array(u8.buffer, u8.byteOffset, u8.byteLength >> 1);
+    })(), enumerable: false });
+    depth = a._bands[best * e.n + Math.min(e.n - 1, Math.max(0, Math.floor(along * e.n)))];
+  }
+  return dist <= depth;
+}
+
+// ¿Tiene la viñeta datos para decidir si su marco es "página"? (capas: alguna capa sólida; plana: edges)
+export function hasFrameData(m) {
+  if (m.layers) return m.layers.some((r) => r.solid);
+  return !!m.asset?.edges;
+}
+
+// Corte en el borde de la caja (modo 'art'): muestrea los lados ocultos en reposo que entran en cuadro y mira qué
+// hay justo adentro. Limpio = capa sólida del color del escenario (o nada: eso lo ve la cobertura) / franja pareja
+// de la imagen del mismo color. Devuelve { px (≤ 0: ancho de lo que se ve afuera en la parte sucia), side, id }.
+function boxEdgeCut({ W, H, stage, m, cam, lt, ls, stageColor }) {
+  const hidden = hiddenSides(m, { W, H, stage });
+  if (!hidden.length) return null;
+  const Mbox = mul(affOf(cam), boxToPage(m));
+  const [iw, ih] = m.inner;
+  const corners = [[0, 0], [iw, 0], [iw, ih], [0, ih]].map(([x, y]) => ap(Mbox, x, y));
+  let toImg = null;
+  if (!m.layers && m.asset?.w) {
+    const L = panelLayoutAt(m, lt);
+    toImg = inv(mul(Mbox, [L.k, 0, 0, L.k, L.left, L.top]));
+  }
+  const edges = !m.layers && m.asset?.edges && sameColor(m.asset.edges.color, stageColor) ? m.asset.edges : null;
+  const topFirst = ls ? [...ls.all].reverse() : null;
+  const hasData = hasFrameData(m);
+  let worst = null;
+  const N = 24;
+  for (const [side, i, j, nl] of BOX_SIDES) {
+    if (!hidden.includes(side)) continue;
+    const A = corners[i];
+    const B = corners[j];
+    // normal hacia afuera en el cuadro (parte lineal de Mbox)
+    let n = [Mbox[0] * nl[0] + Mbox[2] * nl[1], Mbox[1] * nl[0] + Mbox[3] * nl[1]];
+    const nn = Math.hypot(n[0], n[1]) || 1;
+    n = [n[0] / nn, n[1] / nn];
+    for (let q = 0; q <= N; q++) {
+      const P = [A[0] + ((B[0] - A[0]) * q) / N, A[1] + ((B[1] - A[1]) * q) / N];
+      if (inFrame(P, W, H) <= 0.5) continue;
+      const Pin = [P[0] - 1.5 * n[0], P[1] - 1.5 * n[1]];
+      let dirty = null;
+      let depth = Infinity;
+      if (topFirst) {
+        for (const sh of topFirst) {
+          const pl = ap(sh.toLocal, Pin[0], Pin[1]);
+          const s = slack(pl, sh.rect, sh.k);
+          if (s.px <= 0 || (sh.layer && !gridHas(sh.layer, pl[0], pl[1]))) continue;
+          if (!(sh.solid && sameColor(sh.solid, stageColor))) {
+            dirty = hasData ? sh.id : m.id;
+            // cuánto dibujo queda cortado (px del cuadro): se avanza hacia afuera en el plano de la capa
+            if (hasData) depth = cutDepth(sh, pl, n);
+          }
+          break;
+        }
+      } else if (toImg) {
+        const [u, v] = ap(toImg, Pin[0], Pin[1]);
+        if (!(edges && inEdgeBand(m.asset, u, v))) dirty = m.id;
+      } else dirty = m.id;
+      if (!dirty) continue;
+      // lo que se ve: el corte recto mide lo que se ve afuera o lo que falta del dibujo, lo menor
+      const px = -Math.min(rayToFrame(P, n, W, H), depth);
+      if (px > -0.5) continue;
+      if (!worst || px < worst.px) worst = { px, side, id: dirty };
+    }
+  }
+  return worst;
+}
+
+// Profundidad (px del cuadro) del dibujo de una capa más allá de un punto del borde de la caja, hacia afuera (n,
+// dirección en el cuadro): lo que la caja le corta. Pasos de ~2 px de la capa, hasta 600 px del cuadro.
+function cutDepth(sh, pl, n) {
+  const L = sh.toLocal;
+  let d = [L[0] * n[0] + L[2] * n[1], L[1] * n[0] + L[3] * n[1]];
+  const dn = Math.hypot(d[0], d[1]) || 1;
+  d = [d[0] / dn, d[1] / dn];
+  const k = sh.k || 1;
+  const step = Math.max(1, 2 / Math.max(1e-6, k));
+  const [x, y, w, h] = sh.rect;
+  let s = 0;
+  for (; s * k < 600; s += step) {
+    const u = pl[0] + d[0] * s;
+    const v = pl[1] + d[1] * s;
+    if (u < x || v < y || u > x + w || v > y + h) break;
+    if (sh.layer && !gridHas(sh.layer, u, v)) break;
+  }
+  return s * k;
+}
+
+// Margen de los textos visibles (keepText): cuánto les sobra a sus esquinas (ya asentadas) hasta el borde del
+// cuadro, menos `want` px. <0 = el texto no entra entero con ese margen. want puede ser un número o id → número.
+export function textMargins(texts, W, H, want = 24) {
+  let margin = Infinity;
+  let worst = null;
+  for (const tx of texts) {
+    const w = typeof want === 'function' ? want(tx.id) : want;
+    if (w == null) continue;
+    for (const [x, y] of tx.rest || []) {
+      for (const [d, side] of [[x, 'left'], [W - x, 'right'], [y, 'top'], [H - y, 'bottom']]) {
+        const mg = d - w;
+        if (mg < margin) {
+          margin = mg;
+          worst = { id: tx.id, side, px: d };
+        }
+      }
+    }
+  }
+  return { margin, worst };
+}
+
 // Vista segura en un instante. ctx:
 //   { W, H, stage, panels: [panelModel], camera: { view, dx, dy, drot, dzoom, dist?, orbit? }, t (local de la escena),
-//     fullBleed?: bool (la escena en reposo está cubierta por viñetas), texts?: bool }
-// Devuelve { ok, margin (px del cuadro; negativo = se ve un borde vacío de ese tamaño), issues: [...] }.
+//     fullBleed?: bool (la escena en reposo está cubierta por viñetas), bounds?: 'art'|'panel'|'page' (default 'art'),
+//     stageColor?: color del escenario, texts?: bool (check: textos cortados), keepText?: px | (id) → px | null }
+// Devuelve { ok, margin (px del cuadro; negativo = se ve un hueco de ese tamaño), textMargin, textWorst, issues }.
 // issue: { kind: 'edge'|'page'|'text', id, side, px, msg }
 export function safeView(ctx) {
   const { W, H, stage, panels, camera, t } = ctx;
+  const mode = BOUNDS.includes(ctx.bounds) ? ctx.bounds : 'art';
+  const stageColor = ctx.stageColor ?? stage?.background ?? null;
   const cam = cameraAffine(camera, W, H);
   const frame = [[0, 0], [W, 0], [W, H], [0, H]];
   const issues = [];
   let margin = Infinity;
+  let textMargin = Infinity;
+  let textWorst = null;
   const on = panels.filter((m) => t >= m.start && t < m.start + m.duration);
-  if (on.some((m) => !panelSettled(m, t - m.start))) return { ok: true, margin: Infinity, issues, skipped: 'entrada/salida de viñeta' };
-  // 1) plano: fuera de la página, o fuera de las viñetas si la escena es a sangre
+  if (on.some((m) => !panelSettled(m, t - m.start))) return { ok: true, margin: Infinity, textMargin, issues, skipped: 'entrada/salida de viñeta' };
   const camInv = inv(cam);
   const sc = Math.sqrt(Math.abs(det(cam)));
-  const flat = ctx.fullBleed && on.length
-    ? on.map((m) => ({ id: m.id, rect: m.rect, toLocal: camInv, k: sc, what: 'viñeta' }))
-    : [{ id: 'página', rect: [0, 0, stage.w, stage.h], toLocal: camInv, k: sc, what: 'página' }];
-  const fc = coverage(frame, flat);
-  margin = Math.min(margin, fc.margin);
-  if (fc.margin < -0.5) issues.push({ kind: 'page', id: fc.worst.id, side: fc.worst.side, px: fc.margin, msg: `se ve fuera de ${fc.worst.id === 'página' ? 'la página' : 'la viñeta ' + fc.worst.id} (borde ${SIDE_ES[fc.worst.side]}, ${fmtPx(fc.margin)})` });
-  // 2) capas: los fondos tienen que cubrir la caja visible
+  // 1) plano: 'page' = dentro de la página; 'panel' = dentro de las viñetas (o de la página si no están a sangre,
+  //    como siempre); 'art' = por viñeta, más abajo (y 'panel' en las que no tienen datos de color)
+  const flatOf = (list) => {
+    const fc = coverage(frame, list);
+    margin = Math.min(margin, fc.margin);
+    if (fc.margin < -0.5) issues.push({ kind: 'page', id: fc.worst.id, side: fc.worst.side, px: fc.margin, msg: `se ve fuera de ${fc.worst.id === 'página' ? 'la página' : 'la viñeta ' + fc.worst.id} (borde ${SIDE_ES[fc.worst.side]}, ${fmtPx(fc.margin)})` });
+  };
+  const pageShape = { id: 'página', rect: [0, 0, stage.w, stage.h], toLocal: camInv, k: sc };
+  if (mode === 'page') flatOf([pageShape]);
+  else if (mode === 'panel') flatOf(ctx.fullBleed && on.length ? on.map((m) => ({ id: m.id, rect: m.rect, toLocal: camInv, k: sc })) : [pageShape]);
   for (const m of on) {
-    if (!m.layers) continue;
     const lt = t - m.start;
+    const ls = m.layers ? layerShapes({ W, H, m, cam, t: lt, eye3d: camera }) : null;
+    // 2) 'art': lo que se ve fuera de la caja tiene que ser marco (mismo color que el escenario), no un corte
+    if (mode === 'art') {
+      const e = boxEdgeCut({ W, H, stage, m, cam, lt, ls, stageColor });
+      if (e) {
+        margin = Math.min(margin, e.px);
+        if (e.px < -0.5) {
+          const what = e.id === m.id ? (hasFrameData(m) ? 'y corta el dibujo' : '(sin datos del marco: comic tags)') : `y corta ${e.id}`;
+          issues.push({ kind: 'page', panel: m.id, id: m.id, side: e.side, px: e.px, msg: `se ve fuera de la viñeta ${m.id} ${what} (borde ${SIDE_ES[e.side]}, ${fmtPx(e.px)})` });
+        }
+      }
+    }
+    if (!ls) continue;
+    // 3) capas: los fondos tienen que cubrir la caja visible
     const region = boxRegion({ W, H, m, cam });
-    if (region.length < 3 || Math.abs(polyArea(region)) < 1) continue;
-    const ls = layerShapes({ W, H, m, cam, t: lt, eye3d: camera });
-    if (!ls.shapes.length) continue;
-    const c = coverage(region, ls.shapes);
-    margin = Math.min(margin, c.margin);
-    if (c.margin < -0.5) issues.push({ kind: 'edge', panel: m.id, id: c.worst.id, side: c.worst.side, px: c.margin, msg: `se ve el borde ${SIDE_ES[c.worst.side]} de ${c.worst.id} (${fmtPx(c.margin)})` });
+    if (region.length >= 3 && Math.abs(polyArea(region)) >= 1 && ls.shapes.length) {
+      const c = coverage(region, ls.shapes);
+      margin = Math.min(margin, c.margin);
+      if (c.margin < -0.5) issues.push({ kind: 'edge', panel: m.id, id: c.worst.id, side: c.worst.side, px: c.margin, msg: `se ve el borde ${SIDE_ES[c.worst.side]} de ${c.worst.id} (${fmtPx(c.margin)})` });
+    }
+    // 4) keepText: textos visibles enteros dentro del cuadro con margen
+    if (ctx.keepText != null && ctx.keepText !== false) {
+      const tm = textMargins(ls.texts, W, H, ctx.keepText);
+      if (tm.margin < textMargin) {
+        textMargin = tm.margin;
+        textWorst = tm.worst;
+      }
+    }
     if (ctx.texts) {
       const boxInv = inv(ls.Mbox);
       for (const tx of ls.texts) {
         if (!tx.settled) continue;
-        const corners = [[tx.rect[0], tx.rect[1]], [tx.rect[0] + tx.rect[2], tx.rect[1]], [tx.rect[0] + tx.rect[2], tx.rect[1] + tx.rect[3]], [tx.rect[0], tx.rect[1] + tx.rect[3]]].map(([x, y]) => ap(tx.toFrame, x, y));
+        const corners = rectCorners(tx.rect).map(([x, y]) => ap(tx.toFrame, x, y));
         const o = overflow(corners, [0, 0, W, H], ls.Mbox && boxInv, m.inner);
         // entero fuera de cuadro solo cuenta si ACABA de aparecer (at > 0): un texto que la cámara no mira es
         // encuadre; uno que entra fuera de cuadro se pierde. Cortado cuenta siempre (check pide que dure ≥ 0.5 s).
@@ -348,7 +624,7 @@ export function safeView(ctx) {
       }
     }
   }
-  return { ok: margin >= -0.5, margin, issues };
+  return { ok: margin >= -0.5, margin, textMargin, textWorst, issues };
 }
 
 // Cuánto se sale un cuadrilátero (px del cuadro) del cuadro y de la caja de su viñeta.
