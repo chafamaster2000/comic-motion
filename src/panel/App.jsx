@@ -503,7 +503,7 @@ export function App() {
             Cola {openReqs.length ? <b className="badge">{openReqs.length}</b> : null}
           </button>
           <button className="btn primary" onClick={() => setShowExport(true)}>
-            {render.status === 'running' ? `Exportando ${Math.round(((render.frame || 0) / (render.frames || 1)) * 100)}%` : 'Exportar video'}
+            {render.status === 'running' ? `Exportando ${Math.round(((render.frame || 0) / (render.frames || 1)) * 100)}%` : 'Exportar'}
           </button>
         </div>
       </header>

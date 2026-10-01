@@ -2,7 +2,7 @@
 
 **Motion comics con HTML, CSS y [Motion](https://motion.dev) (ex Framer Motion), como skill para [Claude Code](https://docs.claude.com/claude-code).**
 
-Le pasás imágenes y videos a Claude, arma una animación tipo cómic (viñetas, cámara, globos de diálogo, onomatopeyas, líneas de velocidad, halftone) y te abre un **panel de revisión con línea de tiempo**. Ahí aprobás o rechazás variantes, pedís cambios por prompt y ajustás transiciones y timing. Al final **exporta a video** (MP4 H.264 o ProRes, 1080p o 4K).
+Le pasás imágenes y videos a Claude, arma una animación tipo cómic (viñetas, cámara, globos de diálogo, onomatopeyas, líneas de velocidad, halftone) y te abre un **panel de revisión con línea de tiempo**. Ahí aprobás o rechazás variantes, pedís cambios por prompt y ajustás transiciones y timing. Al final **exporta a video** (MP4 H.264 o ProRes, 1080p o 4K) o **a HTML** para publicarlo en la web, con el mismo player en vivo.
 
 ![Uso del panel: variantes, aprobar/rechazar con motivo, ajustar timing y pedir variantes por prompt](docs/uso.gif)
 
@@ -44,7 +44,7 @@ Le pasás imágenes y videos a Claude, arma una animación tipo cómic (viñetas
   - Detección de viñetas en páginas de cómic (OpenCV.js).
   - Recorte de personajes para parallax (BiRefNet_lite en JS, sin Python).
   - **Material por capas** exportado del PSD (PNG más `scene_layout.json`): cada capa es un plano 3D real, con roles y profundidad automáticos, dolly con parallax de verdad y VFX entre capas. Con la cámara quieta coincide píxel a píxel con el PSD.
-- **Export** cuadro por cuadro con Chromium headless (con GPU) y ffmpeg.
+- **Export** cuadro por cuadro con Chromium headless (con GPU) y ffmpeg, o **a HTML**: el mismo player reproduciéndose en vivo en el navegador (carpeta para hosting estático o un solo `.html`).
 
 ## Requisitos
 
@@ -138,6 +138,7 @@ node ~/.claude/skills/comic-motion/bin/comic.js <comando>
   snapshot <dir> --t 0.5,2,3.4        cuadros PNG sueltos
   studio <dir> [--port 4777] [--open] panel de revisión
   render <dir> [--quality 1080|4k] [--codec h264|prores] [--fps 24|30|60] [--from s --to s] [--workers auto|1-8]
+  html <dir> [--out exports/<titulo>_web/] [--single] [--quality 4k|1080] [--no-controls] [--autoplay] [--loop] [--serve [--port N] [--open]]
 ```
 
 ## Un proyecto por dentro
@@ -182,11 +183,47 @@ Aparece solo en el panel. La única regla: todo tiene que depender del tiempo `t
 
 ## Exportar
 
-Desde el botón **Exportar video** del panel (o `comic render`) elegís resolución (1080p o 4K), formato (MP4 H.264 o ProRes), y tramo (todo o el loop marcado). Los **cuadros por segundo** (24, 30 o 60) son configuración del proyecto: se eligen en la barra superior del panel y tanto el preview como el export los respetan. El render corre cuadro por cuadro con el mismo player que el preview, así que lo que aprobaste es exactamente lo que sale.
+Desde el botón **Exportar** del panel (o `comic render`) elegís resolución (1080p o 4K), formato (MP4 H.264 o ProRes), y tramo (todo o el loop marcado). Los **cuadros por segundo** (24, 30 o 60) son configuración del proyecto: se eligen en la barra superior del panel y tanto el preview como el export los respetan. El render corre cuadro por cuadro con el mismo player que el preview, así que lo que aprobaste es exactamente lo que sale.
 
 ![Export: diálogo, progreso y resultado](docs/export.gif)
 
 *Export a 1080p: diálogo, progreso (acelerado) y unos segundos del video resultante.*
+
+### Exportar a HTML (web)
+
+En el diálogo, formato **HTML (web)**, o `comic html <dir>`. Sale el **mismo player** que el preview, reproduciéndose en vivo en el navegador: VFX en GPU (three WebGPU, con respaldo WebGL2), viñetas por capas 3D, filtros, globos, transiciones y video. Se exporta lo activo, como en el video.
+
+```
+comic html <dir> [--out exports/<titulo>_web/] [--single] [--quality 4k|1080] [--no-controls] [--autoplay] [--loop] [--serve [--port N] [--open]]
+```
+
+**Carpeta** (por defecto, `exports/<titulo>_web/`), autocontenida, para subir tal cual a un hosting estático (GitHub Pages, Netlify, un bucket):
+
+| archivo | qué es |
+|---|---|
+| `index.html` | la página; lleva adentro la escena y la configuración (no hace falta `fetch` para eso) |
+| `player.js` | el player (`dist/web.js`): script clásico (IIFE), no módulo ES |
+| `effects.js` | los efectos custom usados, empaquetados (solo si hay) |
+| `scene.json` | copia legible de la escena que va en `index.html` |
+| `assets/` | solo los archivos de las variantes activas: imágenes, capas PNG y máscaras, proxies webm de los videos (el original no viaja), `cutout`/`bgfill` si la viñeta usa profundidad |
+| `fonts/` | las tipografías usadas, con su licencia OFL |
+
+La escena va **saneada**: solo la variante activa de cada escena y clip (los clips ocultos no viajan), sin memoria de revisión (estados, notas, rechazos, pedidos, `approvedHash`), sin `direction` ni la configuración del generador, sin `source`/`description`/hojas de contacto de los assets, y sin las huellas de archivos de la medición de límites (los datos de píxeles que usa la cámara `move3d` se quedan). Si queda alguna ruta absoluta, el export lo avisa. Al terminar imprime el tamaño total.
+
+**`--single`**: un solo `.html` (`exports/<titulo>.html`) con todo embebido en base64, para abrir con doble clic o mandar por mail. Tope: 50 MB de archivos (≈ 67 MB el `.html`); si se pasa, error y sugerencia de usar la carpeta.
+
+**El player web:** escala el cuadro al tamaño de la ventana manteniendo la proporción (letterbox) con `zoom` CSS, igual que el exportador, y dibuja los canvas GPU a la resolución del dispositivo (`devicePixelRatio`). `--quality` es el **tope** de esos canvas: `4k` (por defecto, 3840 px de ancho) o `1080` (1920 px: más liviano en notebooks y celulares). Antes de arrancar precarga todos los archivos con una barra de progreso (los descarga a `blob:` URLs, así las texturas GPU no tienen problemas de origen). Reproduce en tiempo real a `meta.fps`, cuantizado a cuadros como el preview. Controles mínimos (se apagan con `--no-controls`): play/pausa, barra de tiempo, loop y pantalla completa; teclas `Espacio` (o clic en el cuadro), `←`/`→` un cuadro (`Shift` ±1 s), `F` pantalla completa, `L` loop. `--autoplay` arranca solo (no hay audio, así que el navegador lo permite); `--loop` repite. `?ui=0` en la URL esconde controles y carteles (capturas, iframes limpios). Para tests y automatización expone `window.__comicWeb` (`seek(t)`, `play()`, `pause()`, `time`, `duration`, `gpuBackend`, `loadMs`).
+
+**`file://` vs servidor.** Chrome, abriendo un archivo desde el disco, deja usar WebGPU (cuenta como contexto seguro) y scripts clásicos, pero **no** deja leer archivos con `fetch`, y una imagen o video de otro archivo local "contamina" la textura (la GPU no puede leer sus píxeles). Por eso:
+
+| | http (hosting, `--serve`) | `file://` (doble clic) |
+|---|---|---|
+| carpeta | anda todo | lo DOM se vería, pero si hay viñetas GPU (VFX, capas) muestra un aviso: abrir con un servidor o exportar `--single` |
+| `--single` | anda todo | anda todo (los archivos embebidos se pasan a `blob:` URLs del propio documento) |
+
+`comic html <dir> --serve` exporta y sirve la carpeta por http (`--port`, `--open`); `comic html <carpetaExportada> --serve` sirve una que ya existe. Cualquier server estático sirve igual (`npx serve`, `python3 -m http.server`).
+
+Desde el panel, el diálogo muestra el enlace a la carpeta o al archivo (servido por el studio en `/p/exports/…`) y un botón **Abrir**. `node test/html-export.mjs` exporta un proyecto de prueba (imagen, VFX, globo, onomatopeya, efecto custom, transición, video), lo abre por http y por `file://` y compara cada cuadro contra `comic snapshot` del mismo `t`.
 
 ### Rendimiento
 
@@ -211,7 +248,8 @@ Otras cosas que se midieron: la espera por cuadro bajó de 2 `requestAnimationFr
 
 ## Limitaciones conocidas
 
-- Sin audio: el export sale mudo.
+- Sin audio: el export sale mudo (también el HTML).
+- El export HTML en carpeta necesita un servidor (o hosting) cuando hay VFX o capas; para doble clic, `--single`. El HTML se probó en Chrome/Chromium; en navegadores sin WebGPU three cae a WebGL2.
 - La detección de viñetas asume canaletas de un color parejo. Si las viñetas se tocan, Claude corrige los recortes mirando el overlay.
 - En la profundidad 2.5D, el hueco que dejan los personajes se rellena en JS, sin IA: se extiende el color del entorno sin que la tinta ni el negro de los bordes de viñeta se difundan, y se le trasplanta textura (nieve, grano) desde zonas cercanas. No reconstruye objetos ni líneas que el personaje tapaba: en movimientos muy grandes se nota una zona más lisa, y los huecos chicos entre brazos o piernas pueden verse como parches. El recorte suma el contorno de tinta que el segmentador deja afuera y descarta motas sueltas, así el personaje se lleva su contorno. Los textos dibujados en la imagen se fijan con `depthLock` para que no se desfasen.
 - Probado en macOS. Windows y Linux están soportados por el instalador, pero tienen menos horas de uso.

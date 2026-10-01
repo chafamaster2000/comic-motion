@@ -12,6 +12,11 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation,
   const [codec, setCodec] = useState('h264');
   const [range, setRange] = useState('all');
   const [workers, setWorkers] = useState('auto');
+  // export HTML (web): mismas escenas activas, player en vivo; opciones propias
+  const [html, setHtml] = useState({ single: false, quality: '4k', controls: true, autoplay: false, loop: false });
+  const [htmlRes, setHtmlRes] = useState(null); // { status: 'running' | 'done' | 'error', … }
+  const isHtml = codec === 'html';
+  const htmlRunning = htmlRes?.status === 'running';
   const running = render.status === 'running';
   const pending = scene.scenes.filter((s) => !s.variants.some((v) => v.status === 'approved'));
   const pct = running ? Math.round(((render.frame || 0) / (render.frames || 1)) * 100) : 0;
@@ -34,7 +39,7 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation,
   return (
     <Backdrop onClose={onClose}>
       <motion.div className="dialog" initial={{ y: 30, scale: 0.97 }} animate={{ y: 0, scale: 1 }} exit={{ y: 30, scale: 0.97 }}>
-        <h3>Exportar video</h3>
+        <h3>{isHtml ? 'Exportar para la web' : 'Exportar video'}</h3>
         {validation.errors.length > 0 && (
           <div className="warnbox bad">
             La escena tiene errores; el export va a fallar:
@@ -72,16 +77,18 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation,
           </div>
         )}
         <div className="opts">
-          <label>
-            <span>Resolución</span>
-            <div className="seg">
-              {['1080', '4k'].map((q) => (
-                <button key={q} className={quality === q ? 'on' : ''} onClick={() => setQuality(q)} disabled={running}>
-                  {q === '1080' ? '1080p' : '4K'}
-                </button>
-              ))}
-            </div>
-          </label>
+          {!isHtml && (
+            <label>
+              <span>Resolución</span>
+              <div className="seg">
+                {['1080', '4k'].map((q) => (
+                  <button key={q} className={quality === q ? 'on' : ''} onClick={() => setQuality(q)} disabled={running}>
+                    {q === '1080' ? '1080p' : '4K'}
+                  </button>
+                ))}
+              </div>
+            </label>
+          )}
           <label>
             <span>Formato</span>
             <div className="seg">
@@ -91,35 +98,106 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation,
               <button className={codec === 'prores' ? 'on' : ''} onClick={() => setCodec('prores')} disabled={running}>
                 ProRes (.mov)
               </button>
+              <button className={isHtml ? 'on' : ''} onClick={() => setCodec('html')} disabled={running || htmlRunning} title="El mismo player reproduciéndose en vivo en el navegador: para publicar en la web">
+                HTML (web)
+              </button>
             </div>
           </label>
+          {isHtml && (
+            <>
+              <label>
+                <span>Salida</span>
+                <div className="seg">
+                  <button className={!html.single ? 'on' : ''} onClick={() => setHtml({ ...html, single: false })} disabled={htmlRunning} title="index.html + player.js + assets/: para subir a un hosting estático (GitHub Pages, Netlify)">
+                    Carpeta
+                  </button>
+                  <button className={html.single ? 'on' : ''} onClick={() => setHtml({ ...html, single: true })} disabled={htmlRunning} title="Todo embebido en un .html (hasta 50 MB): se abre con doble clic">
+                    Un solo .html
+                  </button>
+                </div>
+              </label>
+              <label>
+                <span>Nitidez GPU</span>
+                <div className="seg">
+                  {['1080', '4k'].map((q) => (
+                    <button
+                      key={q}
+                      className={html.quality === q ? 'on' : ''}
+                      onClick={() => setHtml({ ...html, quality: q })}
+                      disabled={htmlRunning}
+                      title={q === '1080' ? 'Tope de los canvas GPU (VFX, capas) a 1080p: más liviano en notebooks y celulares' : 'Tope a 4K: nítido en pantallas retina grandes'}
+                    >
+                      {q === '1080' ? 'hasta 1080p' : 'hasta 4K'}
+                    </button>
+                  ))}
+                </div>
+              </label>
+              <label>
+                <span>Player</span>
+                <div className="seg">
+                  {[
+                    ['controls', 'Controles'],
+                    ['autoplay', 'Autoplay'],
+                    ['loop', 'Loop'],
+                  ].map(([k, l]) => (
+                    <button key={k} className={html[k] ? 'on' : ''} onClick={() => setHtml({ ...html, [k]: !html[k] })} disabled={htmlRunning}>
+                      {l}
+                    </button>
+                  ))}
+                </div>
+              </label>
+            </>
+          )}
           <label>
             <span>Cuadros/s</span>
             <span className="dim">{scene.meta.fps || 24} fps · se configura arriba, en la barra del proyecto</span>
           </label>
-          <label>
-            <span>En paralelo</span>
-            <div className="seg">
-              {['auto', 1, 2, 3, 4].map((w) => (
-                <button key={w} className={workers === w ? 'on' : ''} onClick={() => setWorkers(w)} disabled={running} title={w === 'auto' ? autoTip : `${w} navegador(es) renderizando tramos a la vez`}>
-                  {w === 'auto' ? (plan ? `Auto (${plan.n})` : 'Auto') : w}
+          {!isHtml && (
+            <label>
+              <span>En paralelo</span>
+              <div className="seg">
+                {['auto', 1, 2, 3, 4].map((w) => (
+                  <button key={w} className={workers === w ? 'on' : ''} onClick={() => setWorkers(w)} disabled={running} title={w === 'auto' ? autoTip : `${w} navegador(es) renderizando tramos a la vez`}>
+                    {w === 'auto' ? (plan ? `Auto (${plan.n})` : 'Auto') : w}
+                  </button>
+                ))}
+              </div>
+            </label>
+          )}
+          {!isHtml && (
+            <label>
+              <span>Tramo</span>
+              <div className="seg">
+                <button className={range === 'all' ? 'on' : ''} onClick={() => setRange('all')} disabled={running}>
+                  Todo
                 </button>
-              ))}
-            </div>
-          </label>
-          <label>
-            <span>Tramo</span>
-            <div className="seg">
-              <button className={range === 'all' ? 'on' : ''} onClick={() => setRange('all')} disabled={running}>
-                Todo
-              </button>
-              <button className={range === 'loop' ? 'on' : ''} onClick={() => setRange('loop')} disabled={running || !loop}>
-                Loop {loop ? `${loop[0].toFixed(2)}–${loop[1].toFixed(2)}s` : '(marcá con shift+arrastrar)'}
-              </button>
-            </div>
-          </label>
+                <button className={range === 'loop' ? 'on' : ''} onClick={() => setRange('loop')} disabled={running || !loop}>
+                  Loop {loop ? `${loop[0].toFixed(2)}–${loop[1].toFixed(2)}s` : '(marcá con shift+arrastrar)'}
+                </button>
+              </div>
+            </label>
+          )}
         </div>
-        {running && (
+        {isHtml && htmlRes?.status === 'running' && <div className="warnbox">Exportando HTML…</div>}
+        {isHtml && htmlRes?.status === 'done' && (
+          <div className="warnbox ok">
+            Listo:{' '}
+            <a href={htmlRes.url} target="_blank" rel="noreferrer">
+              {htmlRes.out}
+              {htmlRes.single ? '' : '/'}
+            </a>{' '}
+            ({(htmlRes.bytes / 1048576).toFixed(1)} MB{htmlRes.single ? ', un archivo' : `, ${htmlRes.files} archivos de la escena`}){' '}
+            <button className="btn tiny" onClick={() => window.open(htmlRes.url, '_blank')}>
+              Abrir
+            </button>
+            <div className="dim">
+              {htmlRes.single ? 'Se abre con doble clic (file://) o se sube tal cual.' : 'Subí la carpeta a un hosting estático (GitHub Pages, Netlify). Desde el disco (file://) la GPU no puede leer los archivos: para doble clic, "Un solo .html".'}
+            </div>
+            {htmlRes.warnings?.length ? <div className="dim">{htmlRes.warnings.join(' · ')}</div> : null}
+          </div>
+        )}
+        {isHtml && htmlRes?.status === 'error' && <div className="warnbox bad">Falló: {htmlRes.error}</div>}
+        {running && !isHtml && (
           <div className="progress">
             <div className="bar" style={{ width: pct + '%' }} />
             <span>
@@ -128,19 +206,30 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation,
             </span>
           </div>
         )}
-        {render.status === 'done' && (
+        {render.status === 'done' && !isHtml && (
           <div className="warnbox ok">
             Listo: <a href={render.url} target="_blank" rel="noreferrer">{render.outFile?.split('/').pop()}</a> ({render.frames} cuadros en {render.seconds?.toFixed(0)}s{render.workers > 1 ? `, ${render.workers} en paralelo` : ''})
             {render.warnings?.length ? <div className="dim">{render.warnings.join(' · ')}</div> : null}
           </div>
         )}
-        {render.status === 'error' && <div className="warnbox bad">Falló: {render.error}</div>}
-        {render.status === 'cancelled' && <div className="warnbox">Export cancelado: no quedó ningún archivo a medias.</div>}
+        {render.status === 'error' && !isHtml && <div className="warnbox bad">Falló: {render.error}</div>}
+        {render.status === 'cancelled' && !isHtml && <div className="warnbox">Export cancelado: no quedó ningún archivo a medias.</div>}
         <div className="dialog-actions">
           <button className="btn ghost" onClick={onClose}>
             Cerrar
           </button>
-          {running ? (
+          {isHtml ? (
+            <button
+              className="btn primary"
+              disabled={htmlRunning}
+              onClick={async () => {
+                setHtmlRes({ status: 'running' });
+                setHtmlRes(await studio.exportHtml(html));
+              }}
+            >
+              Exportar HTML
+            </button>
+          ) : running ? (
             <button className="btn bad" onClick={studio.cancelRender}>
               Cancelar export
             </button>

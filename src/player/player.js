@@ -11,14 +11,15 @@ import { cameraResultsAt, composeCamera, holdsView } from './camera3d.js';
 
 const STYLE_ID = 'cm-player-style';
 
-function injectStyle(fontBase) {
+// fontUrl(nombre de archivo) → url: por defecto fontBase + nombre; el player web (web-entry.js) pasa blob: URLs
+function injectStyle(fontBase, fontUrl = (f) => fontBase + f) {
   if (document.getElementById(STYLE_ID)) return;
   const st = document.createElement('style');
   st.id = STYLE_ID;
   st.textContent = `
-@font-face { font-family: 'Bangers'; src: url('${fontBase}Bangers-Regular.ttf') format('truetype'); font-display: block; }
-@font-face { font-family: 'Comic Neue'; src: url('${fontBase}ComicNeue-Bold.ttf') format('truetype'); font-weight: 700; font-display: block; }
-@font-face { font-family: 'Comic Neue'; src: url('${fontBase}ComicNeue-Regular.ttf') format('truetype'); font-weight: 400; font-display: block; }
+@font-face { font-family: 'Bangers'; src: url('${fontUrl('Bangers-Regular.ttf')}') format('truetype'); font-display: block; }
+@font-face { font-family: 'Comic Neue'; src: url('${fontUrl('ComicNeue-Bold.ttf')}') format('truetype'); font-weight: 700; font-display: block; }
+@font-face { font-family: 'Comic Neue'; src: url('${fontUrl('ComicNeue-Regular.ttf')}') format('truetype'); font-weight: 400; font-display: block; }
 .cm-frame { position: relative; overflow: hidden; contain: strict; }
 .cm-frame * { box-sizing: border-box; }
 .cm-scene, .cm-screen, .cm-overlay { position: absolute; inset: 0; }
@@ -51,9 +52,11 @@ export async function loadCustomEffects(urls) {
   return out;
 }
 
-// opts: { scene, baseUrl (prefijo de archivos del proyecto), fontBase, customDefs }
+// opts: { scene, baseUrl (prefijo de archivos del proyecto), fontBase, customDefs,
+//         urlMap? { 'assets/x.png': 'blob:…' } (player web: archivos ya descargados), fontUrl?(archivo) → url,
+//         pixelScale? número o función, layoutZoom? número o función }
 export function createPlayer(root, opts) {
-  injectStyle(opts.fontBase || '/fonts/');
+  injectStyle(opts.fontBase || '/fonts/', opts.fontUrl);
   const presets = registry(opts.customDefs);
   let scene = opts.scene;
   let built = null;
@@ -75,6 +78,7 @@ export function createPlayer(root, opts) {
   function fileUrl(f) {
     if (!f) return '';
     if (/^(https?:|data:|blob:|\/)/.test(f)) return f;
+    if (opts.urlMap && opts.urlMap[f]) return opts.urlMap[f];
     return (opts.baseUrl || '') + f;
   }
 
@@ -92,7 +96,7 @@ export function createPlayer(root, opts) {
 
   function ensureGpu(frame) {
     // layoutZoom: escala del espacio de layout de Chrome (zoom CSS × devicePixelRatio), donde se redondean las cajas
-    const layoutZoom = () => opts.layoutZoom || window.devicePixelRatio || 1;
+    const layoutZoom = () => (typeof opts.layoutZoom === 'function' ? opts.layoutZoom() : opts.layoutZoom) || window.devicePixelRatio || 1;
     if (!gpu) gpu = createGpuSystem({ frame, W: W(), H: H(), pixelScale, layoutZoom, draft: () => draft, forceWebGL: !!opts.forceWebGL });
     return gpu;
   }

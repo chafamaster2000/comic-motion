@@ -8,6 +8,7 @@ import { reviewAction, layoutScenes } from './shared/scene.js';
 import { createQueue } from './generator.js';
 import { createGuides } from './guide.js';
 import { renderVideo, autoWorkers } from './render.js';
+import { exportHtml } from './html-export.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -40,6 +41,7 @@ export function startServer({ projectDir, port = 0, host = '127.0.0.1', withQueu
   let lastRev = project.rev();
   let render = { status: 'idle' };
   let stopRender = false;
+  let htmlBusy = false;
 
   const send = (event, data) => {
     const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -273,6 +275,22 @@ export function startServer({ projectDir, port = 0, host = '127.0.0.1', withQueu
             send('render', render);
           });
         return json(res, 200, render);
+      }
+      // export HTML (web): copia y sanea, sin navegador; tarda segundos. El resultado se mira en /p/exports/…
+      if (p === '/api/html' && req.method === 'POST') {
+        if (htmlBusy) return json(res, 409, { error: 'ya hay un export HTML corriendo' });
+        const body = await readBody(req);
+        htmlBusy = true;
+        try {
+          const r = await exportHtml(project, { single: !!body.single, quality: body.quality === '1080' ? '1080' : '4k', controls: body.controls !== false, autoplay: !!body.autoplay, loop: !!body.loop });
+          const rel = path.relative(project.dir, r.out).split(path.sep).join('/');
+          project.history([{ ts: new Date().toISOString(), action: 'export', file: rel, format: 'html', single: r.single }]);
+          return json(res, 200, { status: 'done', out: rel, url: '/p/' + rel.split('/').map(encodeURIComponent).join('/') + (r.single ? '' : '/index.html'), bytes: r.bytes, files: r.files, single: r.single, effects: r.effects, warnings: r.warnings, seconds: r.seconds });
+        } catch (e) {
+          return json(res, 400, { status: 'error', error: e.message });
+        } finally {
+          htmlBusy = false;
+        }
       }
       if (p === '/api/events') {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });

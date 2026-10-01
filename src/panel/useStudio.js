@@ -161,6 +161,15 @@ export function useStudio() {
     [flush, notify],
   );
   const cancelRender = useCallback(() => api('POST', '/api/render/cancel'), []);
+  // export HTML (web): síncrono en el server (segundos), devuelve { status, url, out, bytes, … } o { error }
+  const exportHtml = useCallback(
+    async (opts) => {
+      await flush();
+      const r = await api('POST', '/api/html', opts);
+      return r.ok ? r.data : { status: 'error', error: r.data.error || 'no se pudo exportar' };
+    },
+    [flush],
+  );
   // mientras exporta, además del SSE, releer el estado cada 3 s (si un evento se pierde, el diálogo no queda colgado)
   const renderRunning = render.status === 'running';
   useEffect(() => {
@@ -206,5 +215,5 @@ export function useStudio() {
     };
   }, [load, flush]);
 
-  return { scene, presets, requests, render, validation, toast, saveState, edit, review, requestVariants, cancelRequest, startRender, cancelRender, notify, flush, guides, startGuide, loadGuide, guideAction };
+  return { scene, presets, requests, render, validation, toast, saveState, edit, review, requestVariants, cancelRequest, startRender, cancelRender, exportHtml, notify, flush, guides, startGuide, loadGuide, guideAction };
 }

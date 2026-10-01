@@ -95,6 +95,8 @@ export default {
 };
 ```
 
+En el export HTML (`comic html`) los efectos custom usados se empaquetan con esbuild en `effects.js` (script clásico que deja `window.__comicEffects`): pueden importar otros archivos relativos de `effects/`, pero no paquetes (para three usá `ctx.gpu.THREE`). Si leen un asset con `ctx.asset(id)`, el id tiene que aparecer en algún param del clip para que el archivo viaje.
+
 Regla de oro: `update(t)` depende **solo** de `t`, de `params` y de `ctx.rand`/`ctx.hashRand` con semilla. Nada de `Math.random()`, `Date.now()`, animaciones CSS ni `setTimeout`. Si no, el export no coincide con el preview.
 
 ## VFX (pista `vfx`, GPU)

@@ -1,6 +1,6 @@
 ---
 name: comic-motion
-description: Hace animaciones tipo cómic (motion comics) a partir de imágenes y videos del usuario, con HTML, CSS y Motion (ex Framer Motion). Incluye un panel local con línea de tiempo para revisar variantes, aprobarlas o rechazarlas con motivo y ajustar transiciones y timing, y exporta a video MP4/ProRes en 1080p o 4K. Usala cuando el usuario quiera animar viñetas, páginas de cómic, fotos o clips con estética de historieta (globos, onomatopeyas, líneas de velocidad, halftone, paneos de cámara), cuando mencione "motion comic", "animación tipo cómic", "Comic Studio" o un proyecto con scene.json de comic-motion, o cuando pida exportar o seguir iterando una animación de ese tipo.
+description: Hace animaciones tipo cómic (motion comics) a partir de imágenes y videos del usuario, con HTML, CSS y Motion (ex Framer Motion). Incluye un panel local con línea de tiempo para revisar variantes, aprobarlas o rechazarlas con motivo y ajustar transiciones y timing, y exporta a video MP4/ProRes en 1080p o 4K o a HTML para la web (el mismo player en vivo). Usala cuando el usuario quiera animar viñetas, páginas de cómic, fotos o clips con estética de historieta (globos, onomatopeyas, líneas de velocidad, halftone, paneos de cámara), cuando mencione "motion comic", "animación tipo cómic", "Comic Studio" o un proyecto con scene.json de comic-motion, o cuando pida exportar (video o HTML/web) o seguir iterando una animación de ese tipo.
 ---
 
 # comic-motion
@@ -81,7 +81,7 @@ Editá `scene.json` siguiendo [references/scene-format.md](references/scene-form
 - Al crear variantes a mano, usá la memoria de revisión igual que el generador: conservá las `note` y evitá las `rejection`.
 
 ### 6. Exportar
-El export sale del botón **Exportar video** del panel, o de:
+El export sale del botón **Exportar** del panel, o de:
 
 ```
 comic render <dir> --quality 1080|4k [--codec prores] [--from s --to s] [--workers auto|1-8]
@@ -93,6 +93,19 @@ comic render <dir> --quality 1080|4k [--codec prores] [--from s --to s] [--worke
 - El export va **en paralelo** por defecto (`--workers auto`; en el panel, "En paralelo", que muestra cuántos usaría Auto): cada navegador renderiza un tramo contiguo y los tramos se unen sin recodificar. Da los mismos cuadros que en serie y en una M4 tarda menos de la mitad. Auto toma el mínimo entre la mitad de los núcleos (hasta 4), la memoria (~1,5 GB por navegador a 1080 y ~2,5 GB a 4K contra `max(freemem, totalmem/2)`) y uno cada 30 cuadros; siempre al menos 1. Si la máquina está ocupada, `--workers 1`.
 
 **Terminado cuando:** el archivo existe en `exports/`, extrajiste 2 o 3 cuadros con ffmpeg y los miraste, y le pasaste al usuario la ruta y los cuadros.
+
+**Para la web (HTML):** formato **HTML (web)** en el diálogo, o
+
+```
+comic html <dir> [--single] [--quality 4k|1080] [--no-controls] [--autoplay] [--loop] [--out …] [--serve]
+```
+
+- Sale el mismo player, en vivo en el navegador (VFX GPU, capas 3D, globos, transiciones, video), con precarga y controles mínimos. Ver "Exportar a HTML" en el README.
+- **Carpeta** (`exports/<titulo>_web/`: `index.html`, `player.js`, `scene.json` saneado, `assets/` y `fonts/` solo con lo usado, `effects.js` si hay efectos custom): para un hosting estático (GitHub Pages, Netlify). Abierta desde el disco (`file://`) el navegador no deja leer los archivos para la GPU: si hay VFX o capas avisa. Para mirarla: `comic html <carpeta> --serve`.
+- **`--single`**: un solo `.html` con todo embebido (hasta 50 MB de archivos): anda con doble clic.
+- La escena viaja sin memoria de revisión, notas, dirección ni rutas del usuario; solo lo activo. Decile al usuario el tamaño que imprime.
+
+**Terminado cuando (HTML):** lo abriste por http (`--serve`) o el `--single`, sacaste capturas en 2 o 3 momentos con Playwright (`window.__comicWeb.seek(t)`, `?ui=0`) y las miraste, y le pasaste al usuario la ruta y el tamaño.
 
 ## Efectos custom
 Cuando ningún preset alcanza, escribí `effects/<id>.js` en el proyecto con el contrato de la sección "Efectos custom" de `scene-format.md`. Aparece solo en el panel. Todo tiene que ser función del tiempo `t` (nada de `Math.random` ni animaciones CSS), porque si no el export no coincide con el preview.

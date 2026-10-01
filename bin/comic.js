@@ -7,6 +7,7 @@ import { openProject, newScene, validate, catalog, SKILL_DIR, checkGaps } from '
 import { EASES } from '../src/player/ease.js';
 import { startServer } from '../src/server.js';
 import { renderVideo, snapshots } from '../src/render.js';
+import { exportHtml, serveStatic, isWebExportDir } from '../src/html-export.js';
 import { ingest, detectPanels, cutout, ingestLayers, retagLayersAsset, layoutTitle } from '../src/ingest.js';
 import { annotateAssetBounds, boundsWarnings } from '../src/pixel-bounds.js';
 import { listRecipes, applyRecipe } from '../src/recipes/index.js';
@@ -62,6 +63,10 @@ const HELP = `comic <comando> <proyecto> [opciones]
   snapshot <dir> --t 0.5,2,3.4 [--scale 0.5] [--scene s2]   cuadros PNG para mirar
   studio <dir> [--port 4777] [--open] [--lan]   levanta el panel (--lan: accesible desde la red local)
   render <dir> [--quality 1080|4k] [--codec h264|prores] [--fps 24|30|60] [--from s --to s] [--out f.mp4] [--workers auto|1-8]
+  html <dir> [--out exports/<titulo>_web/] [--single] [--quality 4k|1080] [--no-controls] [--autoplay] [--loop] [--serve [--port N] [--open]]
+                                      export para la web: el mismo player en vivo (carpeta con index.html, o --single:
+                                      un .html con todo embebido, hasta 50 MB). --serve: lo sirve por http para mirarlo
+                                      (también: comic html <carpetaExportada> --serve)
 
   test de paridad DOM/GPU: node test/gpu-parity.mjs [--webgl] [--keep]
   test de paridad de capas vs el PSD: node test/layers-parity.mjs <scene_layout.json> [--webgl] [--keep]`;
@@ -121,6 +126,9 @@ async function main() {
     const sc = initProject(typeof flags.title === 'string' ? flags.title : layoutTitle(args[1]));
     console.log(`✓ no había proyecto en ${path.resolve(dir)}: lo creé ("${sc.meta.title}", ${sc.meta.width}×${sc.meta.height}, ${sc.meta.fps} fps; cambialo con --title/--fps o en el panel)`);
   }
+
+  // comic html <carpeta ya exportada> --serve: solo servirla
+  if (cmd === 'html' && ((isWebExportDir(dir) && !fs.existsSync(path.join(dir, '.comic'))) || (/\.html$/i.test(dir) && fs.existsSync(dir)))) return serveHtml(dir);
 
   const project = openProject(dir);
 
@@ -359,6 +367,29 @@ async function main() {
     return console.log(`✓ ${r.outFile}  (${r.frames} cuadros verificados con ffprobe, ${r.seconds.toFixed(1)}s, ${r.workers} en paralelo${r.gpuBackend ? ', VFX con ' + r.gpuBackend : ''})`);
   }
 
+  if (cmd === 'html') {
+    const { scene } = project.read();
+    const { errors } = validate(scene, project);
+    if (errors.length) die('scene.json inválido:\n  ' + errors.join('\n  '));
+    if (flags.quality && !['1080', '4k'].includes(String(flags.quality))) die('--quality tiene que ser 1080 o 4k');
+    const r = await exportHtml(project, {
+      out: typeof flags.out === 'string' ? flags.out : undefined,
+      single: !!flags.single,
+      quality: flags.quality ? String(flags.quality) : '4k',
+      controls: !flags['no-controls'] && flags.controls !== 'false',
+      autoplay: !!flags.autoplay,
+      loop: !!flags.loop,
+    }).catch((e) => die(e.message));
+    for (const w of r.warnings) console.log('⚠ ' + w);
+    const mb = (b) => (b / 1048576).toFixed(1) + ' MB';
+    console.log(`✓ ${r.single ? r.out : r.index}  (${r.single ? 'un archivo' : 'carpeta'} de ${mb(r.bytes)}: ${r.files} archivos de la escena = ${mb(r.assetBytes)}${r.effects.length ? `, efectos custom: ${r.effects.join(', ')}` : ''})`);
+    const shown = path.relative(process.cwd(), r.out).startsWith('..') ? r.out : path.relative(process.cwd(), r.out);
+    if (!r.single) console.log(`  Para verla: subí la carpeta a un hosting estático (GitHub Pages, Netlify…) o \`comic html ${shown} --serve\`. Abierta desde el disco (file://) la GPU no puede leer los archivos: para doble clic usá --single.`);
+    if (r.bytes > 200 * 1048576) console.log('⚠ pesa más de 200 MB: para la web conviene achicar videos/imágenes');
+    if (flags.serve) return serveHtml(r.out);
+    return;
+  }
+
   if (cmd === 'studio') {
     ensureBuilt();
     const srv = await startServer({ projectDir: dir, port: +(flags.port || 4777), host: flags.lan ? '0.0.0.0' : '127.0.0.1' });
@@ -372,6 +403,18 @@ async function main() {
   }
 
   die('comando desconocido: ' + cmd + '\n\n' + HELP);
+}
+
+async function serveHtml(target) {
+  const dirToServe = fs.statSync(target).isDirectory() ? target : path.dirname(target);
+  const page = fs.statSync(target).isDirectory() ? '' : path.basename(target);
+  const srv = await serveStatic(dirToServe, { port: +(flags.port || 0) });
+  const url = srv.url + encodeURI(page);
+  console.log(`✓ sirviendo ${path.resolve(dirToServe)} en ${url}  (Ctrl+C para cortar)`);
+  if (flags.open) {
+    const [c, a] = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : [process.platform === 'darwin' ? 'open' : 'xdg-open', [url]];
+    spawn(c, a, { stdio: 'ignore', detached: true }).unref();
+  }
 }
 
 main().catch((e) => die(e.stack || e.message));
