@@ -1,5 +1,5 @@
 // Qué filtros tienen versión GPU (TSL). Módulo sin three: lo usa también `comic check` en Node.
-export const GPU_FILTERS = ['css', 'posterize', 'chroma', 'paper', 'halftone'];
+export const GPU_FILTERS = ['css', 'posterize', 'chroma', 'paper', 'halftone', 'ink'];
 
 // Parsea un `filter:` CSS a una lista de operaciones soportadas. Devuelve { ops, unsupported: [...] }.
 export function parseCssFilter(value) {

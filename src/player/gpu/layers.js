@@ -17,6 +17,7 @@ import * as THREE from 'three/webgpu';
 import * as TSL from 'three/tsl';
 import { layerState, vfxPlacement, dofOf, depthToZ } from '../layers.js';
 import { restEye, eyeFor, affOf, FOV_DEG } from '../bounds.js';
+import { prepareLayerTexture } from './texprep.js';
 
 const { Fn, uniform, vec2, vec4, float, texture: textureNode, uv, positionWorld, select, clamp, max, step } = TSL;
 
@@ -60,14 +61,17 @@ export class LayersRig {
     return this.rest;
   }
 
-  // textura sin premultiplicar y sin conversión de color, lista cuando termina de decodificar
-  loadExact(url) {
+  // textura sin premultiplicar y sin conversión de color, lista cuando termina de decodificar.
+  // `mips`: pirámide ponderada por alfa y bleeding en alfa 0 (gpu/texprep.js) en vez de los mipmaps de la GPU,
+  // que promediarían el RGB de los píxeles transparentes. Las máscaras de canal R van sin tocar.
+  loadExact(url, { mips = true } = {}) {
     const panel = this.panel;
-    const tex = new THREE.Texture();
+    const tex = new THREE.DataTexture(new Uint8Array(4), 1, 1);
     tex.flipY = false;
     tex.colorSpace = THREE.NoColorSpace;
     tex.premultiplyAlpha = false;
-    tex.generateMipmaps = true;
+    tex.unpackAlignment = 1;
+    tex.generateMipmaps = !mips;
     tex.minFilter = this.info.pixelated ? THREE.NearestMipmapNearestFilter : THREE.LinearMipmapLinearFilter;
     tex.magFilter = this.info.pixelated ? THREE.NearestFilter : THREE.LinearFilter;
     tex.anisotropy = panel.maxAniso;
@@ -76,9 +80,11 @@ export class LayersRig {
       fetch(url)
         .then((r) => r.blob())
         .then((b) => createImageBitmap(b, { premultiplyAlpha: 'none', colorSpaceConversion: 'none', imageOrientation: 'none' }))
+        .then((bmp) => prepareLayerTexture(bmp, mips))
         .then(
-          (bmp) => {
-            tex.image = bmp;
+          (levels) => {
+            tex.image = levels[0];
+            tex.mipmaps = mips ? levels : [];
             tex.needsUpdate = true;
           },
           (e) => console.warn('[comic] capa', url, e),
@@ -96,9 +102,10 @@ export class LayersRig {
     // Las capas se decodifican SIN premultiplicar (createImageBitmap premultiplyAlpha 'none'): un <img> de
     // Chrome guarda el alfa premultiplicado y truncado, y en los bordes suaves eso corre el color 1/255.
     // El shader premultiplica en float; con el destino de 8 bits cada capa se redondea como en Photoshop.
-    const tex = (url) => {
-      if (!texOf.has(url)) texOf.set(url, this.loadExact(url));
-      return texOf.get(url);
+    const tex = (url, mips = true) => {
+      const key = url + (mips ? '' : '#raw');
+      if (!texOf.has(key)) texOf.set(key, this.loadExact(url, { mips }));
+      return texOf.get(key);
     };
     const sampleP = (t, q) => {
       const c = textureNode(t, q);
@@ -119,7 +126,7 @@ export class LayersRig {
       if (bg && bg !== r) {
         const cm = r.clipMask;
         clip = {
-          tex: cm ? tex(this.lx.url(cm.file)) : tex(this.lx.url(bg.file)),
+          tex: cm ? tex(this.lx.url(cm.file), false) : tex(this.lx.url(bg.file)),
           channel: cm ? 'r' : 'a',
           rect: uniform(cm ? new THREE.Vector4(cm.x, cm.y, cm.w, cm.h) : new THREE.Vector4(bg.x, bg.y, bg.w, bg.h)),
           zbg: uniform(0),

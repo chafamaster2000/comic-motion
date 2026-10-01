@@ -7,8 +7,8 @@ import { openProject, newScene, validate, catalog, SKILL_DIR, checkGaps } from '
 import { EASES } from '../src/player/ease.js';
 import { startServer } from '../src/server.js';
 import { renderVideo, snapshots } from '../src/render.js';
-import { ingest, detectPanels, cutout, ingestLayers, retagLayersAsset } from '../src/ingest.js';
-import { annotateAssetBounds } from '../src/pixel-bounds.js';
+import { ingest, detectPanels, cutout, ingestLayers, retagLayersAsset, layoutTitle } from '../src/ingest.js';
+import { annotateAssetBounds, boundsWarnings } from '../src/pixel-bounds.js';
 import { listRecipes, applyRecipe } from '../src/recipes/index.js';
 import { hoistPanelDefaults } from '../src/project.js';
 import { activeVariant, isStale, layoutScenes, totalDuration } from '../src/shared/scene.js';
@@ -39,20 +39,24 @@ const HELP = `comic <comando> <proyecto> [opciones]
 
   init <dir> [--title T] [--width 1920 --height 1080 --fps 24]   crea un proyecto
   ingest <dir> <archivos...>          copia imágenes/videos a assets/ (proxy webm + hoja de contacto)
-  layers <dir> <scene_layout.json> [--exclude margins,…] [--scenes]
+  layers <dir> <scene_layout.json> [--exclude margins,…] [--scenes] [--title T --fps 24]
                                       viñetas por capas (PNGs de un PSD + layout): un asset type 'layers'
                                       por escena con roles, profundidad y clipTo automáticos (--scenes: y una escena por asset)
+                                      si <dir> no tiene proyecto, lo crea (título del layout, 24 fps) y avisa
   panels <dir> <assetId>              detecta viñetas en una página → overlay numerado para revisar
   cutout <dir> <assetId>              recorta el personaje (BiRefNet, JS) → assets/<id>.cutout.png
   tags <dir> [assetId] [--reset]      alias semánticos de capas (@hero, @bg-main, @text-1…): ver/recalcular
                                       (conserva los tags editados a mano salvo --reset); también mide alfa,
-                                      capas sólidas y el marco de las imágenes (límites de cámara)
+                                      capas sólidas y el marco de las imágenes (límites de cámara; solo lo que
+                                      cambió desde la última medición, --reset: todo)
   recipe <dir> <sceneId> <receta> [--target @hero] [--at s] [--duration s] [--replace-camera] [--activate] [--text T] [--dry]
                                       expande una receta de escena a clips normales (si la escena está aprobada,
                                       crea una variante nueva en draft). recipe --list: catálogo
   defaults <dir> [--hoist]            muestra meta.panelDefaults; --hoist sube los params repetidos en todas las viñetas
   check <dir>                         valida scene.json
-  check <dir> --gaps [fps]            además: huecos de cámara (bordes vacíos, textos cortados, VFX fuera de su viñeta)
+  check <dir> --gaps [fps] [--bounds art|panel|page]
+                                      además: huecos de cámara (bordes vacíos, textos cortados, VFX fuera de su viñeta);
+                                      --bounds fuerza qué es hueco (si no, la del move3d de la escena, o art)
   status <dir>                        resumen de revisión: aprobado / rechazado / notas / pedidos
   presets                             catálogo de presets y params (markdown)
   snapshot <dir> --t 0.5,2,3.4 [--scale 0.5] [--scene s2]   cuadros PNG para mirar
@@ -94,15 +98,28 @@ async function main() {
   const dir = args[0];
   if (!dir) die('falta el directorio del proyecto');
 
-  if (cmd === 'init') {
+  // crea el proyecto (scene.json + carpetas); lo usan init y layers sobre una carpeta sin proyecto
+  const initProject = (title) => {
     fs.mkdirSync(dir, { recursive: true });
-    const f = path.join(dir, 'scene.json');
-    if (fs.existsSync(f)) die(`ya existe ${f}`);
-    const scene = newScene({ title: flags.title || path.basename(path.resolve(dir)), width: +flags.width || 1920, height: +flags.height || 1080, fps: +flags.fps || 24 });
-    fs.writeFileSync(f, JSON.stringify(scene, null, 2) + '\n');
+    const scene = newScene({ title, width: +flags.width || 1920, height: +flags.height || 1080, fps: +flags.fps || 24 });
+    fs.writeFileSync(path.join(dir, 'scene.json'), JSON.stringify(scene, null, 2) + '\n');
     for (const d of ['assets', 'effects', 'exports']) fs.mkdirSync(path.join(dir, d), { recursive: true });
     fs.writeFileSync(path.join(dir, '.gitignore'), '.comic/\nexports/\n*.proxy.webm\n');
+    return scene;
+  };
+
+  if (cmd === 'init') {
+    const f = path.join(dir, 'scene.json');
+    if (fs.existsSync(f)) die(`ya existe ${f}`);
+    initProject(flags.title || path.basename(path.resolve(dir)));
     return console.log(`✓ proyecto creado en ${path.resolve(dir)}`);
+  }
+
+  // comic layers sobre una carpeta sin proyecto: lo crea (título del layout o --title; --fps/--width/--height o 24 fps 1920×1080)
+  if (cmd === 'layers' && !fs.existsSync(path.join(dir, 'scene.json'))) {
+    if (!args[1] || !fs.existsSync(args[1])) die('pasá la ruta del scene_layout.json');
+    const sc = initProject(typeof flags.title === 'string' ? flags.title : layoutTitle(args[1]));
+    console.log(`✓ no había proyecto en ${path.resolve(dir)}: lo creé ("${sc.meta.title}", ${sc.meta.width}×${sc.meta.height}, ${sc.meta.fps} fps; cambialo con --title/--fps o en el panel)`);
   }
 
   const project = openProject(dir);
@@ -156,8 +173,11 @@ async function main() {
     for (const id of ids) {
       const a = scene.assets[id];
       if (a?.type !== 'layers') die(`${id} no es un asset de capas`);
+      // límites de cámara: solo las capas cuyo PNG cambió (huella en a.bounds); --reset mide todo
+      const rep = { measured: [], kept: [] };
+      await annotateAssetBounds(project.dir, a, { force: !!flags.reset, report: rep });
       const res = await retagLayersAsset(project, a, { reset: !!flags.reset });
-      console.log(`\n${id}`);
+      console.log(`\n${id}  (bordes: ${rep.measured.length} capas medidas, ${rep.kept.length} sin cambios)`);
       console.log('  ' + pad('capa', 22) + pad('rol', 11) + pad('depth', 7) + 'tags');
       for (const r of res) {
         const l = a.layers.find((x) => x.id === r.id);
@@ -165,8 +185,9 @@ async function main() {
       }
     }
     for (const id of imgs) {
-      const e = await annotateAssetBounds(project.dir, scene.assets[id]);
-      console.log(`\n${id} (imagen): ${e ? `marco ${e.color}, franja [${e.band.join(', ')}] px (límites de cámara)` : 'sin marco parejo en los bordes'}`);
+      const rep = { measured: [], kept: [] };
+      const e = await annotateAssetBounds(project.dir, scene.assets[id], { force: !!flags.reset, report: rep });
+      console.log(`\n${id} (imagen${rep.kept.length ? ', sin cambios' : ''}): ${e ? `marco ${e.color}, franja [${e.band.join(', ')}] px (límites de cámara)` : 'sin marco parejo en los bordes'}`);
     }
     project.write(scene, rev);
     console.log('\nSe usan como "@hero", "@bg-main", "@text-1"… en between, clipTo, params.layers y el target de move3d. Editá `tags` en la capa para corregir (se conservan).');
@@ -220,18 +241,21 @@ async function main() {
 
   if (cmd === 'check') {
     const { errors, warnings } = validate(project.read().scene, project);
+    // datos de bordes (límites de cámara) desactualizados: un PNG reemplazado a mano después de `comic tags`
+    warnings.push(...boundsWarnings(project.dir, project.read().scene.assets));
     for (const w of warnings) console.log('⚠ ' + w);
     for (const e of errors) console.log('✗ ' + e);
     if (errors.length) process.exit(1);
     console.log(`✓ scene.json válido (${warnings.length} avisos)`);
     if (flags.gaps) {
-      // huecos de cámara: muestrea cada escena (4 fps; --gaps 8 para más) sin navegador
+      // huecos de cámara: muestrea cada escena (4 fps; --gaps 8 para más) sin navegador. --bounds fuerza la definición
       const fps = flags.gaps !== true && Number(flags.gaps) > 0 ? Number(flags.gaps) : 4;
-      const g = checkGaps(project.read().scene, { fps });
+      if (flags.bounds && !['art', 'panel', 'page'].includes(flags.bounds)) die(`--bounds tiene que ser art, panel o page (no "${flags.bounds}")`);
+      const g = checkGaps(project.read().scene, { fps, bounds: flags.bounds || null });
       for (const w of g.warnings) console.log('⚠ ' + w);
       for (const l of g.lines) console.log('✗ ' + l);
       if (g.lines.length) process.exit(1);
-      console.log(`✓ sin huecos de cámara (${fps} fps)`);
+      console.log(`✓ sin huecos de cámara (${fps} fps${flags.bounds ? `, bounds ${flags.bounds}` : ''})`);
     }
     return;
   }

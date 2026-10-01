@@ -108,8 +108,17 @@ Desde el panel revisás, pedís variantes y exportás. En cualquier momento pod�
 | `A` | Alternar entre la variante actual y la anterior |
 | `L` | Loop del tramo marcado (`Shift` + arrastrar en la regla) |
 | `Ctrl/⌘` + rueda | Zoom de la línea de tiempo |
-| `P` | Elegir en el preview el punto de anclaje del VFX seleccionado |
+| `P` | Elegir en el preview el punto de anclaje del VFX seleccionado (`Esc` cancela) |
 | `+` / doble clic en un carril | Crear un clip en esa pista |
+| Doble clic en el loop | Quitar el loop marcado |
+| `Inicio` / `Fin` | Ir al principio (del loop, si está activo) / al final |
+| `Esc` | Deseleccionar; en un diálogo, cerrarlo (el guiado sigue abierto en la barra) |
+| `Ctrl/⌘` + `Enter` | Enviar el pedido escrito en el inspector |
+| `1`–`4` (en el guiado) | Elegir esa opción de la pregunta |
+| **Borrador** (botón de la barra) | Preview más liviano; el export sale siempre en calidad final |
+| **⚠ N avisos** (barra) | Avisos del player (cámara, límites); la lista lleva al clip |
+
+Con `comic studio --lan` el panel se puede abrir desde otro equipo de la red (`http://IP:puerto`). Por ser http fuera de localhost, el navegador no habilita WebGPU: el preview usa WebGL2 y el panel lo avisa (chip **VFX: WebGL2 (red)**). El export corre en la máquina del studio y usa WebGPU igual.
 
 ### CLI
 
@@ -120,6 +129,7 @@ node ~/.claude/skills/comic-motion/bin/comic.js <comando>
 
   init <dir> [--title T] [--width 1920 --height 1080 --fps 24]
   ingest <dir> <archivos...>          copia imágenes/videos, proxy y hoja de contacto
+  layers <dir> <scene_layout.json>    viñetas por capas de un PSD (crea el proyecto si no existe: --title, --fps)
   panels <dir> <assetId>              detecta viñetas en una página de cómic
   cutout <dir> <assetId>              recorta el personaje (profundidad 2.5D)
   check <dir>                         valida scene.json
@@ -182,7 +192,7 @@ Desde el botón **Exportar video** del panel (o `comic render`) elegís resoluci
 
 Medido con GPU en Apple Silicon: 1080p ≈ 2 a 3 veces el tiempo real y 4K ≈ 7 veces. Los filtros SVG (tinta, colores planos) son lo más caro. Sin GPU pueden ser bastante más lentos.
 
-**Export en paralelo.** El tramo se parte en N tramos contiguos de cuadros (**En paralelo** en el diálogo, `--workers` en la CLI; *Auto* = la mitad de los núcleos, hasta 4). Cada tramo lo renderiza su propio Chromium con su propio ffmpeg, con el mismo códec y los mismos parámetros, y al final se unen con el concat de ffmpeg **sin recodificar** (`-c copy`). Como el render es función pura de `t` y cada cuadro usa el mismo `t = desde + i/fps` que en serie, los cuadros son los mismos: en ProRes el resultado es idéntico bit a bit al de 1 navegador (`node test/export-parity.mjs` lo comprueba). En H.264 cada tramo arranca en un keyframe, así que el bitstream cambia en las uniones pero la calidad es la misma (CRF 16) y los cuadros son los mismos; el archivo final se verifica con `ffprobe -count_frames`. Cancelar o un error en cualquier tramo corta todos y borra los temporales.
+**Export en paralelo.** El tramo se parte en N tramos contiguos de cuadros (**En paralelo** en el diálogo, `--workers` en la CLI; *Auto* = el mínimo entre la mitad de los núcleos, hasta 4; lo que entra en memoria, ~1,5 GB por navegador a 1080 y ~2,5 GB a 4K contra `max(os.freemem(), os.totalmem()/2)` (en macOS `freemem` no cuenta la caché que se libera sola); y uno cada 30 cuadros. Siempre al menos 1, y el botón muestra cuántos usaría: 24 GB → 4 a 1080 y a 4K, 16 GB → 4 y 3, 8 GB → 2 y 1). Cada tramo lo renderiza su propio Chromium con su propio ffmpeg, con el mismo códec y los mismos parámetros, y al final se unen con el concat de ffmpeg **sin recodificar** (`-c copy`). Como el render es función pura de `t` y cada cuadro usa el mismo `t = desde + i/fps` que en serie, los cuadros son los mismos: en ProRes el resultado es idéntico bit a bit al de 1 navegador (`node test/export-parity.mjs` lo comprueba). En H.264 cada tramo arranca en un keyframe, así que el bitstream cambia en las uniones pero la calidad es la misma (CRF 16) y los cuadros son los mismos; el archivo final se verifica con `ffprobe -count_frames`. Cancelar o un error en cualquier tramo corta todos y borra los temporales.
 
 Medido en una Mac mini M4 (10 núcleos), proyecto por capas con VFX, 31,2 s a 1080p60 (1872 cuadros), H.264:
 
@@ -203,7 +213,7 @@ Otras cosas que se midieron: la espera por cuadro bajó de 2 `requestAnimationFr
 
 - Sin audio: el export sale mudo.
 - La detección de viñetas asume canaletas de un color parejo. Si las viñetas se tocan, Claude corrige los recortes mirando el overlay.
-- En la profundidad 2.5D, el hueco que dejan los personajes se rellena con un fondo difuso (en JS, sin IA). Tapa los fantasmas, pero en movimientos muy grandes puede verse el borrón. Los textos dibujados en la imagen se fijan con `depthLock` para que no se desfasen.
+- En la profundidad 2.5D, el hueco que dejan los personajes se rellena en JS, sin IA: se extiende el color del entorno sin que la tinta ni el negro de los bordes de viñeta se difundan, y se le trasplanta textura (nieve, grano) desde zonas cercanas. No reconstruye objetos ni líneas que el personaje tapaba: en movimientos muy grandes se nota una zona más lisa, y los huecos chicos entre brazos o piernas pueden verse como parches. El recorte suma el contorno de tinta que el segmentador deja afuera y descarta motas sueltas, así el personaje se lleva su contorno. Los textos dibujados en la imagen se fijan con `depthLock` para que no se desfasen.
 - Probado en macOS. Windows y Linux están soportados por el instalador, pero tienen menos horas de uso.
 
 ## Licencias

@@ -48,6 +48,10 @@ export function assetsForPrompt(assets) {
       continue;
     }
     const b = { ...a };
+    if (b.bounds && typeof b.bounds === 'object') {
+      const { files, ...bd } = b.bounds; // huellas de archivos: solo sirven para saber si hay que volver a medir
+      b.bounds = bd;
+    }
     if (b.edges && typeof b.edges === 'object') {
       const { bands, n, ...e } = b.edges;
       b.edges = e;

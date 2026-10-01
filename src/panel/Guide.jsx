@@ -211,12 +211,16 @@ function Done({ scene, session, act, onDone }) {
   const [more, setMore] = useState(false);
   const [moreText, setMoreText] = useState('');
   const [busy, setBusy] = useState(false);
-  const willGenerate = !!(session.target && r.instruction);
+  // sesión de proyecto (sin target) con pedido: el usuario elige a qué escenas va; un pedido por escena
+  const projectReq = !session.target && !!r.instruction;
+  const [picked, setPicked] = useState([]);
+  const togglePick = (id) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+  const willGenerate = !!(r.instruction && (session.target || picked.length));
   const hasDir = r.direction && Object.keys(r.direction).length > 0;
   const where = session.target ? `escena ${session.target.scene}` : 'proyecto';
   const apply = async () => {
     setBusy(true);
-    const res = await act('apply', { count });
+    const res = await act('apply', { count, ...(projectReq ? { scenes: scene.scenes.map((x) => x.id).filter((id) => picked.includes(id)) } : {}) });
     setBusy(false);
     if (res) onDone(res);
   };
@@ -239,8 +243,35 @@ function Done({ scene, session, act, onDone }) {
       )}
       {r.instruction && (
         <div className="guide-block">
-          <div className="guide-label">{willGenerate ? `Pedido al generador · ${r.kind === 'retouch' ? 'retoque' : 'variantes'}` : 'Pedido (sin target: no se genera)'}</div>
+          <div className="guide-label">
+            {session.target ? `Pedido al generador · ${r.kind === 'retouch' ? 'retoque' : 'variantes'}` : `Pedido al generador · ${r.kind === 'retouch' ? 'retoque' : 'variantes'} · elegí las escenas`}
+          </div>
           <div className="guide-instruction">{r.instruction}</div>
+          {projectReq && (
+            <div className="guide-scenes" role="group" aria-label="Escenas a las que se aplica">
+              <div className="guide-scenes-head">
+                <span className="dim">{picked.length ? `${picked.length} escena(s): un pedido por escena, en paralelo` : 'Sin escenas elegidas: solo se guarda la dirección'}</span>
+                <button className="btn tiny ghost" disabled={busy} onClick={() => setPicked(picked.length === scene.scenes.length ? [] : scene.scenes.map((x) => x.id))}>
+                  {picked.length === scene.scenes.length ? 'Ninguna' : 'Todas'}
+                </button>
+              </div>
+              {scene.scenes.map((x) => {
+                const approved = x.variants.some((v) => v.status === 'approved');
+                return (
+                  <label key={x.id} className={'guide-scene ' + (picked.includes(x.id) ? 'on' : '')}>
+                    <input type="checkbox" checked={picked.includes(x.id)} onChange={() => togglePick(x.id)} disabled={busy} />
+                    <b>{x.id}</b>
+                    <span>{x.title || ''}</span>
+                    {approved && (
+                      <span className="chip" title="Las variantes nuevas llegan como borrador; la aprobada no se toca">
+                        aprobada
+                      </span>
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
       {!hasDir && !willGenerate && <div className="warnbox">No hay nada para guardar: seguí preguntando o descartá.</div>}
@@ -268,7 +299,7 @@ function Done({ scene, session, act, onDone }) {
           </select>
         )}
         <button className="btn primary" disabled={busy || (!hasDir && !willGenerate)} onClick={apply}>
-          {willGenerate ? 'Aplicar y generar' : 'Guardar dirección'}
+          {willGenerate ? (projectReq && picked.length > 1 ? `Aplicar y generar en ${picked.length} escenas` : 'Aplicar y generar') : 'Guardar dirección'}
         </button>
       </div>
     </div>

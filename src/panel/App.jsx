@@ -28,6 +28,10 @@ import { layersAssetOf, layerPageQuad, effectiveLayer } from './layers.js';
 
 const GPU_LABEL = { webgpu: 'WebGPU', webgl2: 'WebGL2' };
 const GPU_TIP = { webgpu: 'Los VFX se dibujan con WebGPU', webgl2: 'sin WebGPU: se usa WebGL2' };
+// Abierto por la red (--lan, http://IP:puerto) el navegador no da WebGPU: solo existe en contextos seguros
+// (https o localhost). El preview cae a WebGL2; el export corre en la máquina del studio y usa WebGPU.
+const INSECURE = typeof window !== 'undefined' && window.isSecureContext === false;
+const INSECURE_TIP = 'Preview en WebGL2 por estar en http de red (sin https el navegador no habilita WebGPU); el export usa WebGPU igual. Para ver WebGPU acá, abrí el studio en la misma máquina (localhost).';
 
 // segundos con centésimas + número de cuadro (lo que se ve en el export)
 const fmt = (t, fps) => `${t.toFixed(2)}s`;
@@ -52,6 +56,7 @@ export function App() {
   const [buildTick, setBuildTick] = useState(0); // sube cada vez que el player reconstruye
   const [gpuBackend, setGpuBackend] = useState(null);
   const [playerWarnings, setPlayerWarnings] = useState([]); // avisos de los presets (p.ej. move3d limitó el amount)
+  const [showWarn, setShowWarn] = useState(false); // lista desplegable de avisos del player
   const [draft, setDraft] = useState(false);
   const draftRef = useRef(false);
   const [pick, setPick] = useState(null); // { key, target } mientras se apunta en el preview
@@ -89,7 +94,11 @@ export function App() {
     (res) => {
       store.set(null);
       setGuide(null);
-      if (res?.request) {
+      if (res?.requests?.length > 1) {
+        const r0 = res.requests[0];
+        studio.notify(`${res.requests.length} pedidos encolados (uno por escena): ${r0.count} ${r0.kind === 'retouch' ? 'retoque(s)' : 'variante(s)'} c/u`);
+        setShowQueue(true);
+      } else if (res?.request) {
         studio.notify(`Pedido encolado: ${res.request.count} ${res.request.kind === 'retouch' ? 'retoque(s)' : 'variante(s)'}`);
         setShowQueue(true);
       } else if (res?.session?.applied?.direction) studio.notify('Dirección guardada');
@@ -135,8 +144,30 @@ export function App() {
 
   // el backend de VFX puede resolverse de forma asíncrona (init de WebGPU): se relee cada tanto
   useEffect(() => {
-    const id = setInterval(() => setGpuBackend(playerRef.current?.gpuBackend ?? null), 1000);
+    const id = setInterval(() => {
+      setGpuBackend(playerRef.current?.gpuBackend ?? null);
+      // los avisos de algunos presets aparecen recién al dibujar (p.ej. imágenes que cargan tarde)
+      const w = playerRef.current?.warnings || [];
+      setPlayerWarnings((prev) => (prev.length === w.length && prev.every((x, i) => x === w[i]) ? prev : [...w]));
+    }, 1000);
     return () => clearInterval(id);
+  }, []);
+
+  // la lista de avisos se cierra con clic afuera o Esc
+  useEffect(() => {
+    if (!showWarn) return;
+    const close = (e) => (e.type === 'keydown' ? e.key === 'Escape' : !e.target.closest('.warn-menu')) && setShowWarn(false);
+    window.addEventListener('pointerdown', close);
+    window.addEventListener('keydown', close);
+    return () => {
+      window.removeEventListener('pointerdown', close);
+      window.removeEventListener('keydown', close);
+    };
+  }, [showWarn]);
+
+  useEffect(() => {
+    if (INSECURE) studio.notify('Preview en WebGL2 por estar en http de red; el export usa WebGPU.', 'warn');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const toggleDraft = useCallback(() => {
@@ -195,6 +226,21 @@ export function App() {
   }, []);
 
   const layout = useMemo(() => (scene ? layoutScenes(scene) : []), [scene]);
+
+  // desde un aviso "escena/clip: …": seleccionar el clip y llevar el cursor a su arranque
+  const goToClip = useCallback(
+    ({ scene: sid, clip }) => {
+      const entry = layout.find((e) => e.scene.id === sid);
+      const sv = entry?.variant?.id || entry?.variant || activeVariant(scene?.scenes.find((x) => x.id === sid))?.id;
+      setSelection({ scene: sid, clip, sceneVariant: sv });
+      setShowWarn(false);
+      if (entry) {
+        const v = activeVariant(findTarget(scene, { scene: sid, clip, sceneVariant: sv }).holder);
+        seek(entry.start + (v?.start || 0));
+      }
+    },
+    [layout, scene, seek],
+  );
 
   // params de tipo 'anchor' del clip seleccionado (para el marcador y la mira)
   const selAnchor = useMemo(() => {
@@ -394,8 +440,14 @@ export function App() {
         </div>
         <div className="top-right">
           {GPU_LABEL[gpuBackend] && (
-            <span className={'pill gpu ' + gpuBackend} title={GPU_TIP[gpuBackend]}>
+            <span className={'pill gpu ' + gpuBackend + (INSECURE ? ' insecure' : '')} title={INSECURE ? INSECURE_TIP : GPU_TIP[gpuBackend]}>
               VFX: {GPU_LABEL[gpuBackend]}
+              {INSECURE ? ' (red)' : ''}
+            </span>
+          )}
+          {!GPU_LABEL[gpuBackend] && INSECURE && (
+            <span className="pill gpu webgl2 insecure" title={INSECURE_TIP}>
+              http de red: sin WebGPU
             </span>
           )}
           <button className={'btn ghost draft-btn ' + (draft ? 'on' : '')} onClick={toggleDraft} title="Modo borrador: preview más liviano. Lo que ves no es la calidad final (el export siempre sale en calidad final).">
@@ -405,7 +457,37 @@ export function App() {
             {validation.errors.length ? `${validation.errors.length} errores` : 'válido'}
             {validation.warnings.length ? ` · ${validation.warnings.length} avisos` : ''}
           </span>
-          <span className="pill">
+          {playerWarnings.length > 0 && (
+            <span className="warn-menu">
+              <button className={'pill warn ' + (showWarn ? 'on' : '')} onClick={() => setShowWarn((v) => !v)} title="Avisos del player (cámara, límites, presets) de lo que está en pantalla: clic para ver la lista e ir al clip">
+                ⚠ {playerWarnings.length} {playerWarnings.length === 1 ? 'aviso' : 'avisos'}
+              </button>
+              <AnimatePresence>
+                {showWarn && (
+                  <motion.ul key="wl" className="warn-pop" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} transition={{ duration: 0.14 }}>
+                    {playerWarnings.map((w) => {
+                      const m = /^([^/]+)\/([^:]+): (.*)$/.exec(w);
+                      return (
+                        <li key={w}>
+                          {m ? (
+                            <button onClick={() => goToClip({ scene: m[1], clip: m[2] })} title="Ir al clip">
+                              <b>
+                                {m[1]}/{m[2]}
+                              </b>
+                              <span>{m[3]}</span>
+                            </button>
+                          ) : (
+                            <span>{w}</span>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </motion.ul>
+                )}
+              </AnimatePresence>
+            </span>
+          )}
+          <span className="pill approved">
             {approvedCount}/{scene.scenes.length} escenas aprobadas
           </span>
           <span className={'save ' + saveState}>{{ saved: 'guardado', dirty: 'sin guardar…', saving: 'guardando…', error: 'error al guardar' }[saveState]}</span>
@@ -529,7 +611,7 @@ export function App() {
       <Timeline scene={scene} presets={presets} layout={layout} time={time} fps={fps} duration={duration} seek={seek} edit={studio.edit} selection={selection} setSelection={setSelection} loop={loop} setLoop={(r) => { setLoop(r); setLoopOn(!!r); }} />
 
       <AnimatePresence>
-        {showExport && <ExportDialog key="exp" studio={studio} render={render} onClose={() => setShowExport(false)} loop={loop} scene={scene} validation={validation} />}
+        {showExport && <ExportDialog key="exp" studio={studio} render={render} onClose={() => setShowExport(false)} loop={loop} scene={scene} validation={validation} playerWarnings={playerWarnings} goTo={(t) => { setShowExport(false); goToClip(t); }} />}
         {confirmState && <ConfirmDialog key="confirm" title={confirmState.title} message={confirmState.message} okLabel={confirmState.okLabel} cancelLabel={confirmState.cancelLabel} onAnswer={answerConfirm} />}
         {guide?.visible && (guide.id ? guideSession : !guide.starting) && (
           <GuideDialog

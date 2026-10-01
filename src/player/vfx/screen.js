@@ -78,7 +78,8 @@ export const impactFlash = {
   },
 };
 
-// Bloom sobre la viñeta (BloomNode de three): umbral, radio, intensidad.
+// Bloom sobre la viñeta (BloomNode de three): umbral, radio, intensidad. Defaults conservadores: en una
+// página de cómic los globos son blanco puro y con umbral bajo el halo borra el texto (umbral 0.96, 0.35, 0.2).
 export const glow = {
   id: 'glow',
   kind: 'vfx',
@@ -87,18 +88,18 @@ export const glow = {
   label: 'Bloom / resplandor',
   params: [
     ...common({ layer: false }),
-    { key: 'threshold', label: 'Umbral (0..1)', type: 'number', min: 0, max: 1, step: 0.02, default: 0.88 },
-    { key: 'radius', label: 'Radio (0..1)', type: 'number', min: 0, max: 1, step: 0.05, default: 0.35 },
-    { key: 'strength', label: 'Intensidad', type: 'number', min: 0, max: 4, step: 0.05, default: 0.55 },
+    { key: 'threshold', label: 'Umbral (0..1)', type: 'number', min: 0, max: 1, step: 0.02, default: 0.96 },
+    { key: 'radius', label: 'Radio (0..1)', type: 'number', min: 0, max: 1, step: 0.05, default: 0.2 },
+    { key: 'strength', label: 'Intensidad', type: 'number', min: 0, max: 4, step: 0.05, default: 0.35 },
     { key: 'fade', label: 'Fundido de entrada/salida (s)', type: 'number', min: 0, max: 3, step: 0.05, default: 0.25 },
   ],
   build(ctx) {
     const g = ctx.gpu;
     const p = ctx.params;
-    const b = g.bloom({ strength: 0, radius: p.radius ?? 0.35, threshold: p.threshold ?? 0.88 });
+    const b = g.bloom({ strength: 0, radius: p.radius ?? 0.2, threshold: p.threshold ?? 0.96 });
     return {
       update(t) {
-        b.strength.value = (p.strength ?? 0.55) * (p.intensity ?? 1) * envelope(t, ctx.duration, p.fade ?? 0.25, p.fade ?? 0.25) * g.enabled.value;
+        b.strength.value = (p.strength ?? 0.35) * (p.intensity ?? 1) * envelope(t, ctx.duration, p.fade ?? 0.25, p.fade ?? 0.25) * g.enabled.value;
       },
     };
   },

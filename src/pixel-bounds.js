@@ -2,14 +2,27 @@
 // así el player, move3d y `comic check --gaps` usan los mismos números sin leer imágenes.
 //   capa de un asset `layers`: alpha [x, y, w, h] (bbox del alfa ≥ 16 en px del lienzo, solo si es más chico que el
 //                              bbox de la capa), solid '#rrggbb' (capa de un solo color, p. ej. el negro de la página)
-//                              grid { cell, cols, rows, bits (base64) }: celdas del bbox del alfa con dibujo, y
+//                              grid { cell, cols, rows, rle (base64) }: celdas del bbox del alfa con dibujo, y
 //                              hull { n, rows, cols }: contorno por franjas (min/max del dibujo en cada franja)
 //   asset `image`:             edges { color, band: [izq, arriba, der, abajo], n, bands } (px del asset de la franja
 //                              pareja de ese color en cada borde —mínimo por lado y por tramos, base64 Int16—: la
 //                              canaleta/marco dibujado de la propia imagen)
+//   asset (los dos tipos):     bounds { v, measured (ISO), files: { <file>: 'size:mtimeMs:sha1[@x,y]' } }: marca de
+//                              "medido" y huella de cada archivo. Con ella el player sabe que hay datos aunque no
+//                              haya marco liso, `comic check` avisa si un PNG cambió a mano y `comic tags` recalcula
+//                              solo lo que cambió.
 // Ver "Cámara 3D (move3d) y límites" en references/scene-format.md.
+import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import sharp from 'sharp';
+
+// versión de los datos de píxeles: subirla hace que `comic tags` recalcule todo y `comic check` avise.
+// 2: grilla del alfa hasta 128 celdas por lado (RLE) y marca `bounds` con huellas.
+export const BOUNDS_V = 2;
+// grilla del alfa: hasta GRID_MAX celdas en el lado largo, celdas de GRID_MIN_CELL px como mínimo
+export const GRID_MAX = 128;
+const GRID_MIN_CELL = 4;
 
 const hex = (r, g, b) => '#' + [r, g, b].map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
 const close = (d, i, c, tol) => Math.abs(d[i] - c[0]) <= tol && Math.abs(d[i + 1] - c[1]) <= tol && Math.abs(d[i + 2] - c[2]) <= tol;
@@ -46,6 +59,32 @@ function dominant(data, n, use) {
   return { rgb: s.map((v) => v / m), share: bn / tot, count: tot };
 }
 
+// Grilla en RLE: largos de corridas alternadas (empieza con celdas vacías), varint LEB128, en base64. Las
+// grillas son manchas grandes: a 128 celdas ocupa menos que los bits crudos a 64. Decodifica bounds.js (gridHas).
+function encodeRuns(bits, n) {
+  const out = [];
+  const put = (v) => {
+    while (v > 127) {
+      out.push((v & 127) | 128);
+      v >>>= 7;
+    }
+    out.push(v);
+  };
+  let cur = 0;
+  let run = 0;
+  for (let c = 0; c < n; c++) {
+    const b = (bits[c >> 3] >> (c & 7)) & 1;
+    if (b === cur) run++;
+    else {
+      put(run);
+      cur = b;
+      run = 1;
+    }
+  }
+  put(run);
+  return Buffer.from(out).toString('base64');
+}
+
 // Capa (PNG): bbox del alfa y color sólido.
 export async function layerPixelInfo(file) {
   const { data, info } = await sharp(file).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
@@ -64,10 +103,10 @@ export async function layerPixelInfo(file) {
       }
   if (x1 < 0) return { alpha: [0, 0, 0, 0], solid: null, empty: true };
   const alpha = [x0, y0, x1 - x0 + 1, y1 - y0 + 1];
-  // grilla gruesa del alfa (≤ 64 celdas en el lado largo) sobre el bbox del alfa: celda con dibujo = ≥ 2 % de sus
-  // píxeles con α ≥ 128. Sin grilla si todas tienen dibujo (un rect lleno). Sirve para no tomar como "dibujo" los
-  // triángulos transparentes de una viñeta inclinada ni el aire de un PNG con mucho margen.
-  const cell = Math.max(8, Math.ceil(Math.max(alpha[2], alpha[3]) / 64));
+  // grilla del alfa (≤ GRID_MAX celdas en el lado largo, celdas de ≥ 4 px) sobre el bbox del alfa: celda con dibujo
+  // = ≥ 2 % de sus píxeles con α ≥ 128. Sin grilla si todas tienen dibujo (un rect lleno). Sirve para no tomar como
+  // "dibujo" los triángulos transparentes de una viñeta inclinada ni el aire de un PNG con mucho margen.
+  const cell = Math.max(GRID_MIN_CELL, Math.ceil(Math.max(alpha[2], alpha[3]) / GRID_MAX));
   const cols = Math.ceil(alpha[2] / cell);
   const rows = Math.ceil(alpha[3] / cell);
   const cnt = new Uint32Array(cols * rows);
@@ -82,7 +121,7 @@ export async function layerPixelInfo(file) {
     if (cnt[c] >= Math.max(1, 0.02 * area)) bits[c >> 3] |= 1 << (c & 7);
     else full = false;
   }
-  const grid = full ? null : { cell, cols, rows, bits: Buffer.from(bits).toString('base64') };
+  const grid = full ? null : { cell, cols, rows, rle: encodeRuns(bits, cols * rows) };
   // contorno por franjas (48 filas y 48 columnas sobre el bbox del alfa): [min, max] de x con dibujo en cada franja
   // de filas y de y en cada franja de columnas, relativos al bbox. Da el borde real (inclinado, curvo) de la capa
   // con ~2 % del lado de error: con eso se sabe si el borde de la caja corta el dibujo o solo el aire de al lado.
@@ -167,18 +206,98 @@ export async function imageEdgeInfo(file) {
   return { color: hex(...c), band, n: N, bands: Buffer.from(bands.buffer).toString('base64') };
 }
 
-// Completa (o recalcula) los datos de límites de un asset. Muta el asset; devuelve un resumen.
-export async function annotateAssetBounds(projectDir, asset) {
+// ---------- huellas (marca de "medido" y datos desactualizados) ----------
+// Huella de un archivo: tamaño, mtime y sha1 (12 hex). Para saber si cambió alcanza con tamaño + mtime; si el mtime
+// difiere (copia del proyecto, git checkout) se compara el sha1, así una copia no cuenta como cambio.
+export function fileFingerprint(abs) {
+  const st = fs.statSync(abs);
+  const h = crypto.createHash('sha1').update(fs.readFileSync(abs)).digest('hex').slice(0, 12);
+  return `${st.size}:${Math.round(st.mtimeMs)}:${h}`;
+}
+// rec: 'size:mtime:hash' (+ '@x,y' en capas: la posición en el lienzo, porque `alpha` va en px del lienzo).
+// Devuelve null si cambió, o la huella vigente (con el mtime actual si solo cambió el mtime).
+function freshRecord(abs, rec, place = '') {
+  if (typeof rec !== 'string') return null;
+  const [fp, at = ''] = rec.split('@');
+  if (at !== place) return null;
+  const [size, mtime, hash] = fp.split(':');
+  let st;
+  try {
+    st = fs.statSync(abs);
+  } catch {
+    return null;
+  }
+  if (String(st.size) !== size) return null;
+  if (String(Math.round(st.mtimeMs)) === mtime) return rec;
+  const now = fileFingerprint(abs);
+  return now.split(':')[2] === hash ? now + (place ? '@' + place : '') : null;
+}
+const placeOf = (l) => `${l.x},${l.y}`;
+// archivos que mide annotateAssetBounds: [{ key (archivo), abs, place, layer? }]
+function measuredFiles(projectDir, asset) {
+  if (asset?.type === 'layers') return (asset.layers || []).filter((l) => l.role !== 'guide' && l.file).map((l) => ({ key: l.file, abs: path.join(projectDir, l.file), place: placeOf(l), layer: l }));
+  if (asset?.type === 'image' && asset.file) return [{ key: asset.file, abs: path.join(projectDir, asset.file), place: '' }];
+  return [];
+}
+// ¿El asset tiene datos de píxeles de una versión sin huellas (antes de `bounds`)?
+const legacyData = (a) => !!(a?.edges || (a?.layers || []).some((l) => l.alpha || l.solid || l.grid));
+
+// Estado de los datos de límites de un asset (para `comic check`):
+//   { state: 'ok' | 'none' (nunca se midió) | 'legacy' (medido sin huellas o con otra versión) | 'stale', files: [] }
+export function boundsStatus(projectDir, asset) {
+  const list = measuredFiles(projectDir, asset);
+  if (!list.length) return { state: 'ok', files: [] };
+  const b = asset.bounds;
+  if (!b || typeof b !== 'object' || !b.files) return { state: legacyData(asset) ? 'legacy' : 'none', files: [] };
+  if (b.v !== BOUNDS_V) return { state: 'legacy', files: [] };
+  const stale = list.filter((f) => !freshRecord(f.abs, b.files[f.key], f.place)).map((f) => f.key);
+  return { state: stale.length ? 'stale' : 'ok', files: stale };
+}
+
+// Avisos de `comic check` por datos de bordes desactualizados (un PNG reemplazado a mano, datos de otra versión).
+export function boundsWarnings(projectDir, assets) {
+  const out = [];
+  for (const [id, a] of Object.entries(assets || {})) {
+    if (a?.type !== 'layers' && a?.type !== 'image') continue;
+    const s = boundsStatus(projectDir, a);
+    if (s.state === 'stale') out.push(`datos de bordes desactualizados para ${id} (${s.files.join(', ')} cambió desde la última medición): corré comic tags`);
+    else if (s.state === 'legacy') out.push(`datos de bordes desactualizados para ${id} (medidos con una versión anterior): corré comic tags`);
+  }
+  return out;
+}
+
+// Completa (o recalcula) los datos de límites de un asset. Muta el asset. Solo mide los archivos que cambiaron desde
+// la última medición (huella en asset.bounds); force: todos. report (opcional): { measured: [], kept: [] }.
+// Devuelve: capas → [{ id, alpha, solid, grid, kept }]; imagen → edges (o null).
+export async function annotateAssetBounds(projectDir, asset, { force = false, report = null } = {}) {
+  const prev = asset?.bounds && asset.bounds.v === BOUNDS_V && asset.bounds.files ? asset.bounds.files : null;
+  const files = {};
+  let changed = false;
+  const reuse = (f) => {
+    if (force || !prev) return null;
+    return freshRecord(f.abs, prev[f.key], f.place);
+  };
   if (asset?.type === 'layers') {
     const out = [];
-    for (const l of asset.layers || []) {
-      if (l.role === 'guide') continue;
+    for (const f of measuredFiles(projectDir, asset)) {
+      const l = f.layer;
+      const kept = reuse(f);
+      if (kept) {
+        files[f.key] = kept;
+        if (kept !== prev[f.key]) changed = true;
+        report?.kept.push(l.id);
+        out.push({ id: l.id, alpha: l.alpha || null, solid: l.solid || null, grid: !!l.grid, kept: true });
+        continue;
+      }
       let info;
       try {
-        info = await layerPixelInfo(path.join(projectDir, l.file));
+        info = await layerPixelInfo(f.abs);
+        files[f.key] = fileFingerprint(f.abs) + '@' + f.place;
       } catch {
         continue;
       }
+      changed = true;
+      report?.measured.push(l.id);
       const [ax, ay, aw, ah] = info.alpha;
       if (!info.empty && (ax > 0 || ay > 0 || aw < l.w || ah < l.h)) l.alpha = [l.x + ax, l.y + ay, aw, ah];
       else delete l.alpha;
@@ -192,19 +311,36 @@ export async function annotateAssetBounds(projectDir, asset) {
         delete l.grid;
         delete l.hull;
       }
-      out.push({ id: l.id, alpha: l.alpha || null, solid: l.solid || null, grid: !!l.grid });
+      out.push({ id: l.id, alpha: l.alpha || null, solid: l.solid || null, grid: !!l.grid, kept: false });
     }
+    setBounds(asset, files, changed || !prev || Object.keys(prev).length !== Object.keys(files).length);
     return out;
   }
   if (asset?.type === 'image') {
+    const [f] = measuredFiles(projectDir, asset);
+    const kept = f && reuse(f);
+    if (kept) {
+      report?.kept.push(asset.file);
+      setBounds(asset, { [f.key]: kept }, kept !== prev[f.key]);
+      return asset.edges || null;
+    }
     try {
-      const e = await imageEdgeInfo(path.join(projectDir, asset.file));
+      const e = await imageEdgeInfo(f.abs);
       if (e) asset.edges = e;
       else delete asset.edges;
+      report?.measured.push(asset.file);
+      setBounds(asset, { [f.key]: fileFingerprint(f.abs) }, true);
     } catch {
       /* sin datos: los límites se evalúan como 'panel' */
     }
     return asset.edges || null;
   }
   return null;
+}
+
+// marca de "medido": la fecha solo cambia si se midió algo (así `comic tags` sin cambios no ensucia scene.json)
+function setBounds(asset, files, changed) {
+  if (!Object.keys(files).length) return;
+  const measured = changed || !asset.bounds?.measured ? new Date().toISOString() : asset.bounds.measured;
+  asset.bounds = { v: BOUNDS_V, measured, files };
 }

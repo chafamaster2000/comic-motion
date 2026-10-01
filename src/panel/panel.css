@@ -320,3 +320,32 @@ input.depth-num::placeholder { color: var(--dim); font-style: italic; }
 .between-sel b { color: var(--dim); font-weight: 400; font-size: 12px; }
 .between-none { font-size: 12px; }
 .warn-line { color: var(--amber); font-size: 12px; }
+/* avisos del player en la barra superior */
+.warn-menu { position: relative; }
+button.pill.warn { border: 1px solid #4d3417; color: var(--amber); cursor: pointer; font: inherit; font-size: 12px; }
+button.pill.warn.on, button.pill.warn:hover { background: #3a2f16; }
+.warn-pop { position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; width: min(520px, 80vw); max-height: 60vh; overflow: auto; margin: 0; padding: 6px; list-style: none; background: var(--bg2); border: 1px solid var(--bg3); border-radius: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5); }
+.warn-pop li button { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; background: none; border: 0; color: var(--text); padding: 6px 8px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12.5px; }
+.warn-pop li button:hover { background: var(--bg3); }
+.warn-pop li button b { color: var(--amber); font-weight: 600; }
+.warn-pop li > span { display: block; padding: 6px 8px; font-size: 12.5px; }
+.warnbox button.linkish { background: none; border: 0; padding: 0; color: var(--acc); cursor: pointer; font: inherit; text-decoration: underline; }
+.pill.gpu.insecure { border-style: dashed; }
+/* guiado de proyecto: a qué escenas va el pedido */
+.guide-scenes { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; max-height: 190px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+.guide-scenes-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 0 2px 4px; font-size: 12px; }
+.guide-scene { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.guide-scene:hover { background: var(--bg3); }
+.guide-scene.on { background: #2b2a1a; }
+.guide-scene span:not(.chip) { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guide-scene input { accent-color: var(--acc); }
+/* barra superior en pantallas medianas: que no se corte "Exportar" */
+.top-right { flex-shrink: 0; }
+@media (max-width: 1640px) {
+  .brand > .dim { display: none; }
+  .save { min-width: 0; }
+  .top-right { gap: 6px; }
+}
+@media (max-width: 1380px) {
+  .top-right .pill.approved { display: none; }
+}

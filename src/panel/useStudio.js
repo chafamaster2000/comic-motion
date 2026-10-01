@@ -161,6 +161,13 @@ export function useStudio() {
     [flush, notify],
   );
   const cancelRender = useCallback(() => api('POST', '/api/render/cancel'), []);
+  // mientras exporta, además del SSE, releer el estado cada 3 s (si un evento se pierde, el diálogo no queda colgado)
+  const renderRunning = render.status === 'running';
+  useEffect(() => {
+    if (!renderRunning) return;
+    const id = setInterval(() => api('GET', '/api/render').then((r) => r.ok && setRender((cur) => (r.data.status !== 'running' || (r.data.frame || 0) >= (cur.frame || 0) ? r.data : cur))), 3000);
+    return () => clearInterval(id);
+  }, [renderRunning]);
 
   useEffect(() => {
     load();
@@ -168,6 +175,11 @@ export function useStudio() {
     api('GET', '/api/requests').then((r) => r.ok && setRequests(r.data));
     api('GET', '/api/render').then((r) => r.ok && setRender(r.data));
     const es = new EventSource('/api/events');
+    // al (re)conectar el SSE se pierden los eventos del medio: resincronizar export y cola
+    es.addEventListener('hello', () => {
+      api('GET', '/api/render').then((r) => r.ok && setRender(r.data));
+      api('GET', '/api/requests').then((r) => r.ok && setRequests(r.data));
+    });
     es.addEventListener('scene', (e) => {
       const d = JSON.parse(e.data);
       if (d.by === clientId || d.rev === rev.current) return;

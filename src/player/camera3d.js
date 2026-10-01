@@ -59,6 +59,18 @@ export function composeCamera(base, results) {
   return { view, dx, dy, drot, dzoom, dist, orbit: [yaw, pitch], dof };
 }
 
+// Viñetas sin datos del marco (`comic tags` no corrió, o es un video): con bounds 'art' se evalúan como 'panel'.
+// Mismo texto en el aviso de move3d (ctx.warn → player.warnings, inspector del panel) y en `comic check --gaps`.
+export function frameDataWarnings(models) {
+  const out = [];
+  for (const m of models) {
+    if (!m.asset || hasFrameData(m)) continue;
+    const video = m.asset.type === 'video';
+    out.push(`viñeta ${m.id}: el asset ${m.p.asset} no tiene datos del marco (${m.layers ? 'capas sólidas/alfa' : 'edges'}): se evalúa como bounds 'panel' (mirar fuera de la viñeta cuenta como hueco). ${video ? 'Los videos no se miden' : '`comic tags` los mide'}`);
+  }
+  return out;
+}
+
 // ---------- move3d ----------
 const SAFE_PX = -0.5; // misma tolerancia que safeView/check
 export const MOVES = ['pushIn', 'pullOut', 'truck', 'pedestal', 'dollyZoom', 'arc', 'crane', 'reveal', 'rackFocus', 'handheld', 'breathe'];
@@ -455,6 +467,39 @@ function stateToResult(st) {
   return res;
 }
 
+// Tramos de move3d normalizados (orden de `at`, dur implícita hasta el siguiente o el fin del clip). Lo usan el plan
+// y `shotProblems` (check): un solo criterio.
+function normShots(p, dur) {
+  const chained = Array.isArray(p.shots) && p.shots.length;
+  const raw = chained ? p.shots : [{ at: 0, dur, move: p.move, target: p.target, amount: p.amount, direction: p.direction, ease: p.ease, zoom: p.zoom, from: p.from, to: p.to, dof: p.dof }];
+  return raw
+    .map((s0, i) => {
+      const s = s0 && typeof s0 === 'object' ? s0 : {};
+      return { ...s, _i: i, at: +s.at || 0, dur: Math.max(0, s.dur ?? (i + 1 < raw.length ? (+raw[i + 1]?.at || 0) - (+s.at || 0) : dur - (+s.at || 0))) };
+    })
+    .sort((a, b) => a.at - b.at);
+}
+
+// Problemas de tiempos de los tramos (`shots`): arranca después del fin del clip, termina después, o se pisa con el
+// anterior. El plan los avisa (ctx.warn) y `comic check` los da como error. dur: duración del clip.
+export function shotProblems(params, dur) {
+  const p = params || {};
+  if (!(Array.isArray(p.shots) && p.shots.length)) return [];
+  const out = [];
+  const eps = 1e-6;
+  const list = normShots(p, dur);
+  const name = (s) => `shot ${s._i + 1}${s.move ? ` (${s.move})` : ''}`;
+  let prev = null;
+  for (const s of list) {
+    if (s.at < 0) out.push(`${name(s)}: at ${s.at} s negativo`);
+    if (dur > 0 && s.at >= dur - eps) out.push(`${name(s)}: arranca en ${+s.at.toFixed(3)} s, después del fin del clip (${+dur.toFixed(3)} s): no se ve`);
+    else if (dur > 0 && s.at + s.dur > dur + eps) out.push(`${name(s)}: termina en ${+(s.at + s.dur).toFixed(3)} s, después del fin del clip (${+dur.toFixed(3)} s): se corta`);
+    if (prev && s.at < prev.at + prev.dur - eps) out.push(`${name(s)} se pisa con ${name(prev)}: arranca en ${+s.at.toFixed(3)} s y ${name(prev)} termina en ${+(prev.at + prev.dur).toFixed(3)} s (la cámara salta al final de ${name(prev)})`);
+    prev = s;
+  }
+  return out;
+}
+
 // Arma los tramos con sus límites. Devuelve { shots, warnings, limits }.
 // Prioridades (de más a menos importante): 1) no ver huecos (bounds); 2) keepText: los textos visibles enteros
 // dentro del cuadro con margen; 3) el amount pedido; 4) centrar el objetivo. Primero se corre el encuadre, después
@@ -472,21 +517,20 @@ export function planMove3d(ctx) {
   if (p.bounds && !BOUNDS.includes(p.bounds)) warn(`bounds "${p.bounds}" desconocido (${BOUNDS.join('|')}); se usa 'art'`);
   const keepText = p.keepText !== false;
   const chained = Array.isArray(p.shots) && p.shots.length;
-  const raw = chained ? p.shots : [{ at: 0, dur, move: p.move, target: p.target, amount: p.amount, direction: p.direction, ease: p.ease, zoom: p.zoom, from: p.from, to: p.to, dof: p.dof }];
-  const shots = raw
-    .map((s, i) => ({
+  for (const pr of shotProblems(p, dur)) warn(pr);
+  const shots = normShots(p, dur).map((s) => {
+    return {
       ...s,
-      _i: i,
-      at: +s.at || 0,
-      dur: Math.max(0, s.dur ?? (i + 1 < raw.length ? (+raw[i + 1].at || 0) - (+s.at || 0) : dur - (+s.at || 0))),
       move: MOVES.includes(s.move) ? s.move : (warn(`move desconocido "${s.move}" (${MOVES.join('|')}); se usa pushIn`), 'pushIn'),
       target: s.target !== undefined ? s.target : p.target,
       ease: s.ease || p.ease || 'easeInOut',
       zoom: s.zoom ?? (chained ? undefined : p.zoom ?? undefined),
       direction: s.direction ?? (chained ? undefined : p.direction),
       amount: s.amount ?? p.amount ?? 0.5,
-    }))
-    .sort((a, b) => a.at - b.at);
+    };
+  });
+  // sin datos del marco, 'art' evalúa esa viñeta como 'panel' (mirar fuera de la caja cuenta como hueco): avisar
+  if (bounds === 'art') for (const w of frameDataWarnings(env.panels)) warn(w);
   const vstart = ctx.variant?.start || 0;
   // efectos de cámara de la escena (no sostienen vista: shake, dutch, dolly); los llena el player/check al construir
   const effects = (ctx.cameraEffects || []).filter((r) => r && r.variant && !holdsView(r.def));
@@ -674,6 +718,43 @@ export function planMove3d(ctx) {
   return { env, shots, warnings, limits, initial };
 }
 
+// ---------- memo del plan entre rebuilds ----------
+// El plan es función pura de: params y tiempos del clip, semilla (handheld/breathe), viñetas de la escena (params y
+// assets que usan), efectos de cámara de la escena, stage, cuadro y fps. El panel reconstruye el player en cada
+// edición: con la clave igual se reusa el plan (5–60 ms menos por move3d). Map de módulo con límite (LRU). La
+// clave serializa los assets cada vez (no se cachea por identidad: un asset editado en el lugar daría un plan viejo).
+const PLAN_CACHE = new Map();
+export const PLAN_CACHE_MAX = 48;
+export function planKey(ctx) {
+  const panels = ctx.panels || [];
+  const ids = [...new Set(panels.map((pc) => pc.params?.asset).filter(Boolean))].sort();
+  const fx = (ctx.cameraEffects || []).filter((r) => r && r.variant && !holdsView(r.def)).map((r) => [r.clip?.id ?? null, r.variant.id ?? null, r.variant.preset ?? r.def?.id ?? null, r.variant.start ?? 0, r.variant.duration ?? 0, r.variant.params ?? null]);
+  const head = JSON.stringify([ctx.params, ctx.duration, ctx.variant?.start ?? 0, ctx.seed ?? 0, ctx.frame, ctx.fps ?? null, ctx.stage, panels.map((pc) => [pc.id, pc.start ?? 0, pc.duration ?? 0, pc.params]), fx]);
+  const str = head + ids.map((id) => '\u0000' + id + '\u0000' + JSON.stringify(ctx.asset?.(id) ?? null)).join('');
+  // dos hashes de 32 bits con distinta semilla + largo: colisión despreciable con ≤ 48 entradas
+  return `${hashString(str)}:${hashString('\u0001' + str)}:${str.length}`;
+}
+export function cachedPlan(ctx) {
+  let key;
+  try {
+    key = planKey(ctx);
+  } catch {
+    return planMove3d(ctx); // params no serializables: sin memo
+  }
+  const hit = PLAN_CACHE.get(key);
+  if (hit) {
+    PLAN_CACHE.delete(key); // LRU: al final
+    PLAN_CACHE.set(key, hit);
+    for (const w of hit.warnings) ctx.warn?.(w);
+    return hit;
+  }
+  const plan = planMove3d(ctx);
+  PLAN_CACHE.set(key, plan);
+  while (PLAN_CACHE.size > PLAN_CACHE_MAX) PLAN_CACHE.delete(PLAN_CACHE.keys().next().value);
+  return plan;
+}
+export const clearPlanCache = () => PLAN_CACHE.clear();
+
 // estado del plan en el tiempo local del clip
 export function move3dState(plan, t) {
   const { shots, initial } = plan;
@@ -709,9 +790,10 @@ export const move3d = {
     { key: 'shots', label: 'Encadenado [{at, dur, move, target, amount, direction, ease, zoom}]', type: 'json', default: null },
   ],
   build(ctx) {
-    // el plan se arma en el primer uso: así ya están construidos los demás clips de cámara (ctx.cameraEffects)
+    // el plan se arma en el primer uso: así ya están construidos los demás clips de cámara (ctx.cameraEffects).
+    // Memo entre rebuilds (cachedPlan): editar otra escena no recalcula este plan; sus avisos se repiten por ctx.warn.
     let plan = null;
-    const get = () => (plan = plan || planMove3d(ctx));
+    const get = () => (plan = plan || cachedPlan(ctx));
     return {
       get warnings() {
         return get().warnings;
@@ -797,7 +879,9 @@ export function sceneCamera(scene, entry, presets, { warn } = {}) {
 
 // ---------- comic check --gaps ----------
 // Muestrea cada escena a `fps` (4) y junta los problemas en tramos. Devuelve { issues: [{ scene, t0, t1, kind, id, px, msg }], warnings }.
-export function checkGaps(scene, presets, { fps = 4 } = {}) {
+// bounds: 'art' | 'panel' | 'page' fuerza la definición de hueco (si no, la de la cámara move3d de la escena).
+export function checkGaps(scene, presets, { fps = 4, bounds: force = null } = {}) {
+  const forced = BOUNDS.includes(force) ? force : null;
   const issues = [];
   const warnings = [];
   for (const entry of layoutScenes(scene)) {
@@ -808,13 +892,11 @@ export function checkGaps(scene, presets, { fps = 4 } = {}) {
     const fullBleed = isFullBleed({ W: sc.W, H: sc.H, stage: sc.stage, panels: models });
     // misma definición de hueco que el limitador: la de la cámara move3d de la escena (default 'art')
     const m3 = sc.cams.find((r) => r.def?.id === 'move3d');
-    const bounds = BOUNDS.includes(m3?.variant.params?.bounds) ? m3.variant.params.bounds : 'art';
-    if (bounds === 'art') {
-      for (const m of models) {
-        // videos: `comic tags` no los mide (el marco puede cambiar cuadro a cuadro); quedan como 'panel'
-        if (m.asset && !hasFrameData(m)) warnings.push(`${sid}/${m.id}: el asset ${m.p.asset} no tiene datos del marco (${m.layers ? 'capas sólidas/alfa' : 'edges'}): mirar fuera de la viñeta cuenta como hueco. ${m.asset.type === 'video' ? 'Los videos no se miden (se evalúa como bounds \'panel\')' : '`comic tags` los mide'}`);
-      }
-    }
+    const own = BOUNDS.includes(m3?.variant.params?.bounds) ? m3.variant.params.bounds : 'art';
+    const bounds = forced || own;
+    // videos: `comic tags` no los mide (el marco puede cambiar cuadro a cuadro); quedan como 'panel'. Si la definición
+    // es la de un move3d de la escena, el aviso ya lo da move3d (ctx.warn): no repetirlo.
+    if (bounds === 'art' && !(m3 && own === 'art')) for (const w of frameDataWarnings(models)) warnings.push(`${sid}/${w}`);
     const open = new Map(); // clave → tramo abierto
     // textos/globos cortados: solo si dura ≥ 0.5 s (un paneo que los cruza no es un error)
     const minText = Math.max(1, Math.ceil(0.5 * fps - 1e-9));

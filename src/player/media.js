@@ -39,3 +39,19 @@ export function layerLayout(asset, crop, boxW, boxH, view, depth) {
 
 // Profundidad de las capas de VFX (coherente con las capas del preset panel).
 export const VFX_LAYER_DEPTH = { back: 0, mid: 0.5, front: 1.25 };
+
+// Espera a que el cuadro de un <video> recién buscado (seek) esté PRESENTADO, es decir listo para copiarse a
+// una textura GPU (copyExternalImageToTexture / texImage2D). `seeked` solo dice que el decoder llegó; el cuadro
+// puede llegar al compositor un instante después. requestVideoFrameCallback lo garantiza. Hay que llamarla
+// ANTES de que termine el seek (en la misma tarea que asigna currentTime), si no el callback no llega.
+// Sin rVFC (o si no llega en `timeoutMs`) el player cae a un rAF después de `seeked`, como antes.
+export function presentedFrame(video, timeoutMs = 250) {
+  if (typeof video.requestVideoFrameCallback !== 'function') return null;
+  let id = 0;
+  const p = new Promise((res) => {
+    id = video.requestVideoFrameCallback((_now, meta) => res({ via: 'rvfc', mediaTime: meta?.mediaTime }));
+    setTimeout(() => res({ via: 'timeout' }), timeoutMs);
+  });
+  p.cancel = () => video.cancelVideoFrameCallback?.(id);
+  return p;
+}

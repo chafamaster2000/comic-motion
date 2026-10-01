@@ -84,15 +84,16 @@ export const sparks = {
     ...common({ layer: 'front', anchor: true, style: true }),
     { key: 'rate', label: 'Chispas por segundo', type: 'number', min: 1, max: 5000, default: 160 },
     { key: 'emit', label: 'Emite durante (s, 0 = todo el clip)', type: 'number', min: 0, max: 30, step: 0.05, default: 0 },
-    { key: 'life', label: 'Vida (s)', type: 'number', min: 0.05, max: 5, step: 0.05, default: 0.9 },
-    { key: 'speed', label: 'Velocidad (px/s)', type: 'number', min: 0, max: 5000, default: 750 },
+    { key: 'life', label: 'Vida (s)', type: 'number', min: 0.05, max: 5, step: 0.05, default: 1 },
+    { key: 'speed', label: 'Velocidad (px/s)', type: 'number', min: 0, max: 5000, default: 900 },
     { key: 'angle', label: 'Dirección (°, -90 = arriba)', type: 'number', min: -180, max: 180, default: -90 },
     { key: 'spread', label: 'Apertura (°)', type: 'number', min: 0, max: 360, default: 70 },
     { key: 'gravity', label: 'Gravedad (px/s²)', type: 'number', min: -3000, max: 5000, default: 1500 },
     { key: 'drag', label: 'Drag (1/s)', type: 'number', min: 0, max: 10, step: 0.1, default: 1.2 },
-    { key: 'size', label: 'Tamaño (px)', type: 'number', min: 0.5, max: 30, step: 0.5, default: 3 },
+    { key: 'size', label: 'Tamaño (px)', type: 'number', min: 0.5, max: 30, step: 0.5, default: 5 },
     { key: 'stretch', label: 'Estiramiento por velocidad', type: 'number', min: 0, max: 4, step: 0.1, default: 1 },
-    { key: 'temperature', label: 'Temperatura (0 = blanco caliente, 1 = brasa)', type: 'number', min: 0, max: 1, step: 0.05, default: 0.1 },
+    { key: 'temperature', label: 'Temperatura (0 = blanco caliente, 1 = brasa)', type: 'number', min: 0, max: 1, step: 0.05, default: 0.15 },
+    { key: 'cover', label: 'Cobertura (0 = aditivo puro; más = se leen sobre fondos claros)', type: 'number', min: 0, max: 1, step: 0.05, default: 0.5 },
     { key: 'color', label: 'Color fijo (vacío = por temperatura)', type: 'color', default: '' },
     { key: 'radius', label: 'Radio del emisor (px)', type: 'number', min: 0, max: 400, default: 10 },
   ],
@@ -120,24 +121,26 @@ function sparkSystem(ctx, o) {
     {
       count: o.count,
       style: o.style === 'ink' ? 'ink' : 'glow',
+      cover: o.cover ?? 0.5,
+      streakFade: 0.3,
       stretch: o.stretch ?? 1,
       shutter: 1 / (ctx.fps || 24),
       halo: 0.55,
       soft: 0.25,
       motion: ({ r0, r1, t, idx, fx }) => {
         const tb = o.birth(float(idx), r0.w);
-        const life = r0.z.mul(0.5).add(0.5).mul(o.life ?? 0.9);
+        const life = r0.z.mul(0.5).add(0.5).mul(o.life ?? 1);
         const tau = t.sub(tb);
         const a = o.radial ? r0.x.mul(Math.PI * 2) : r0.x.sub(0.5).mul(spread).add(angle);
-        const sp = o.radial ? pow(r0.y, 0.5).mul(0.75).add(0.25).mul(o.speed ?? 750) : r0.y.mul(0.6).add(0.4).mul(o.speed ?? 750);
+        const sp = o.radial ? pow(r0.y, 0.5).mul(0.75).add(0.25).mul(o.speed ?? 900) : r0.y.mul(0.6).add(0.4).mul(o.speed ?? 900);
         const v0 = vec2(cos(a), sin(a)).mul(sp);
         const p0 = vec2(o.anchor[0], o.anchor[1]).add(r1.xy.sub(0.5).mul((o.radius ?? 10) * 2));
         const pv = fx.ballistic(p0, v0, vec2(0, o.gravity ?? 1500), float(o.drag ?? 1.2), max(tau, 0));
         const u = tau.div(life).clamp(0, 1);
         const alive = tau.greaterThanEqual(0).and(tau.lessThan(life));
         const alpha = select(alive, pow(float(1).sub(u), 1.3).mul(inten), float(0)).mul(g.enabled);
-        const color = col ? vec3(col.r, col.g, col.b) : fx.heat(u.mul(0.85).add(o.temperature ?? 0.1).clamp(0, 1));
-        return { pos: pv.xy, vel: pv.zw, size: r1.z.mul(0.8).add(0.6).mul(o.size ?? 3).mul(float(1).sub(u.mul(0.5))), alpha, color };
+        const color = col ? vec3(col.r, col.g, col.b) : fx.heat(u.mul(0.85).add(o.temperature ?? 0.15).clamp(0, 1));
+        return { pos: pv.xy, vel: pv.zw, size: r1.z.mul(0.8).add(0.6).mul(o.size ?? 5).mul(float(1).sub(u.mul(0.5))), alpha, color };
       },
     },
     o.layer || 'front',

@@ -265,14 +265,35 @@ export function sideMargins(region, sh) {
 // `comic tags`), si no el bbox de la capa (un PNG con mucho margen transparente puede dar un falso "cubierto").
 export const layerRect = (r) => (Array.isArray(r.alpha) && r.alpha.length === 4 ? r.alpha : [r.x, r.y, r.w, r.h]);
 
-// Grilla gruesa del alfa (`grid`, sobre layerRect): ¿hay dibujo en el punto local (u, v)? Sin grilla: sí.
+// Grilla del alfa (`grid`, sobre layerRect): ¿hay dibujo en el punto local (u, v)? Sin grilla: sí.
+// `rle` (v2, hasta 128 celdas por lado): corridas alternadas desde "vacío", varint LEB128; `bits` (v1): bits crudos.
 function decodeBits(b64) {
   if (typeof atob === 'function') return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   return new Uint8Array(Buffer.from(b64, 'base64'));
 }
+function decodeRuns(b64, n) {
+  const src = decodeBits(b64);
+  const bits = new Uint8Array(Math.ceil(n / 8));
+  let c = 0;
+  let cur = 0;
+  for (let i = 0; i < src.length && c < n; ) {
+    let run = 0;
+    let sh = 0;
+    for (;;) {
+      const b = src[i++];
+      run += (b & 127) * 2 ** sh;
+      sh += 7;
+      if (!(b & 128) || i >= src.length) break;
+    }
+    if (cur) for (let k = 0; k < run && c + k < n; k++) bits[(c + k) >> 3] |= 1 << ((c + k) & 7);
+    c += run;
+    cur ^= 1;
+  }
+  return bits;
+}
 export function gridHas(r, u, v) {
   const g = r.grid;
-  if (!g || !g.bits) return true;
+  if (!g || !(g.bits || g.rle)) return true;
   const hl = r.hull;
   if (hl && hl.n && !r._hull) {
     const i16 = (b) => {
@@ -295,7 +316,7 @@ export function gridHas(r, u, v) {
       if (a < 0 || v - hy < a || v - hy > hl.cols[cb * 2 + 1]) return false;
     }
   }
-  if (!r._bits) Object.defineProperty(r, '_bits', { value: decodeBits(g.bits), enumerable: false });
+  if (!r._bits) Object.defineProperty(r, '_bits', { value: g.rle ? decodeRuns(g.rle, g.cols * g.rows) : decodeBits(g.bits), enumerable: false });
   const [x, y] = layerRect(r);
   const cx = Math.floor((u - x) / g.cell);
   const cy = Math.floor((v - y) / g.cell);
@@ -445,8 +466,11 @@ export function inEdgeBand(a, u, v) {
   return dist <= depth;
 }
 
-// ¿Tiene la viñeta datos para decidir si su marco es "página"? (capas: alguna capa sólida; plana: edges)
+// ¿Tiene la viñeta datos para decidir si su marco es "página"? Medido por `comic tags`/`comic layers`/`comic ingest`
+// (marca `bounds` en el asset, aunque no haya ninguna capa sólida ni franja pareja: entonces no hay marco y lo que
+// la caja corta se mide como dibujo); sin marca (datos de antes de las huellas): alguna capa sólida / edges.
 export function hasFrameData(m) {
+  if (m.asset?.bounds?.files && (m.asset.type === 'layers' || m.asset.type === 'image')) return true;
   if (m.layers) return m.layers.some((r) => r.solid);
   return !!m.asset?.edges;
 }

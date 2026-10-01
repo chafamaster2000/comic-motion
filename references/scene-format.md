@@ -104,7 +104,7 @@ Efectos con three.js (`WebGPURenderer`, cae solo a WebGL2) dibujados **dentro de
 | param | tipo | qué hace |
 |---|---|---|
 | `target` | `clipRef` | clip id de la viñeta; vacío = la primera viñeta de la escena |
-| `anchor` | `anchor` `[x, y]` | punto en px de página (como `rect`); vacío = centro de la viñeta |
+| `anchor` | `anchor` `[x, y]` \| `"@tag"` \| `"layer:<id>"` \| `["@tag", fx, fy]` | punto en px de página (como `rect`), o una capa de la viñeta por capas: el centro del bbox de su alfa, o el punto (fx, fy) 0..1 de ese bbox (en reposo; `check` da error si no resuelve); vacío = centro de la viñeta |
 | `layer` | `back` \| `mid` \| `front` | back = detrás del fondo, mid = entre el fondo (`bgfill`) y el recorte fg, front = delante de todo (incluso depthLock) |
 | `style` | `glow` \| `ink` | glow = aditivo con halo; ink = contorno de tinta (dos pasadas) y relleno plano |
 | `stepFps` | número | 0 = continuo; 12 = animado "de a dos" (t cuantizado) |
@@ -113,7 +113,11 @@ Efectos con three.js (`WebGPURenderer`, cae solo a WebGL2) dibujados **dentro de
 
 **Niebla (`fog`).** Bancos de niebla procedurales: fbm de ruido Perlin (4 octavas) con deformación de dominio, en `layers` láminas (1..4) con parallax propio: las lejanas más chicas, más altas y lentas; las cercanas más grandes, pegadas al piso y rápidas. Ocupa una banda baja de la viñeta (`height`, 0..1 desde abajo) con borde ondulado. Params: `density` (0..1), `color`, `height`, `speed` (viento en px/s, negativo = izquierda), `scale` (px de los bancos), `softness`, `evolve` (cuánto cambia la forma por segundo), `fade`, `avoid` (`[[x,y,w,h],…]` zonas despejadas: caras, globos), `avoidFeather`, `region`. `style: glow` = normal con un 25 % aditivo (luz dispersa); `style: ink` = `inkLevels` bandas posterizadas con filete de tinta. En `mid` queda detrás del recorte 2.5D y del depthLock; en `front` tapa todo, así que ahí usá `avoid`. Es función pura de `t` (y de la semilla del clip).
 
-**Modo GPU de la viñeta.** Si una viñeta tiene un VFX en capa `mid`/`back`, un VFX de deformación o de pantalla (`shockwave`, `heat`, `impactFlash`, `glow`) o `params.gpu: true`, three dibuja su contenido completo (fondo, recorte, depthLock, ken burns, filtros) con los mismos números que el DOM (`src/player/media.js`); la caja (borde, radio, sombra, tilt, entrada/salida) sigue siendo CSS. Si solo tiene VFX `front`, el canvas va encima de la imagen DOM. Las viñetas sin VFX no cambian. Filtros soportados en GPU: `css` (brightness, contrast, saturate, grayscale, sepia, invert, hue-rotate), `posterize`, `chroma`, `paper`, `halftone`; `ink` y los custom se ignoran (lo avisa `comic check`). En la GPU los filtros se aplican también a las partículas mid/back/front.
+**Modo GPU de la viñeta.** Si una viñeta tiene un VFX en capa `mid`/`back`, un VFX de deformación o de pantalla (`shockwave`, `heat`, `impactFlash`, `glow`) o `params.gpu: true`, three dibuja su contenido completo (fondo, recorte, depthLock, ken burns, filtros) con los mismos números que el DOM (`src/player/media.js`); la caja (borde, radio, sombra, tilt, entrada/salida) sigue siendo CSS. Si solo tiene VFX `front`, el canvas va encima de la imagen DOM. Las viñetas sin VFX no cambian. Filtros soportados en GPU: `css` (brightness, contrast, saturate, grayscale, sepia, invert, hue-rotate), `posterize`, `chroma`, `paper`, `halftone`, `ink` (misma cadena que el SVG: gris → Laplaciano 3×3 en px de dispositivo → tabla de 12 escalones; con la caja rotada se evalúa en la grilla de la caja como Chrome); los filtros custom (`kind: 'filter'` de `effects/`) se ignoran en una viñeta GPU (lo avisa `comic check`). En la GPU los filtros se aplican también a las partículas mid/back/front.
+
+**Glow y zoom.** El bloom (`glow`) trabaja a la mitad de la resolución de la página en reposo y esa resolución sigue al zoom efectivo de la cámara (cámara, dolly, escala de la caja): al acercarse 2× el halo crece 2×, igual que el dibujo. Defaults pensados para páginas con globos blancos: `threshold` 0.96, `strength` 0.35, `radius` 0.2 (con umbrales bajos el halo de los globos borra el texto). `sparks` tiene `cover` (0.5): parte del alfa tapa lo de abajo para que las chispas se lean también sobre fondos claros (0 = aditivo puro).
+
+**Video en una viñeta GPU.** Al exportar, después de cada seek se espera `requestVideoFrameCallback` (el cuadro buscado ya está presentado) y un rAF antes de subir la textura (sin rVFC: rAF después de `seeked`). Verificado cuadro a cuadro contra el proxy extraído con ffmpeg, en WebGPU y WebGL2.
 
 Capas y parallax: los grupos de `ctx.gpu.layer()` están en px de página y se escalan con el empuje 2.5D según su profundidad (back 0, mid 0.5, front 1.25; el recorte fg es 1.1). La cámara y las transiciones son las del DOM.
 
@@ -199,7 +203,7 @@ Copia los PNG a `assets/layers/<escena>/` (las capas de la raíz del PSD, como `
 - `area`: px de alfa. Sirve para estimar el tiempo de lectura. Si sabés el texto, agregá `text: "…"` o `words: n`.
 
 - `tags` / `tagsAuto`: alias semánticos (ver abajo).
-- `alpha`, `solid`, `grid`, `hull`: datos de píxeles para los límites de cámara (bbox del alfa real, color si la capa es de un solo color, celdas y contorno del dibujo). Los escriben `comic layers` y `comic tags`; no se editan a mano (ver "Cámara 3D (move3d) y límites").
+- `alpha`, `solid`, `grid`, `hull`: datos de píxeles para los límites de cámara (bbox del alfa real, color si la capa es de un solo color, celdas y contorno del dibujo). Los escriben `comic layers` y `comic tags`, junto con `bounds` en el asset (marca de medido y huellas de los PNG); no se editan a mano (ver "Cámara 3D (move3d) y límites").
 
 ### Tags (alias semánticos de capas)
 
@@ -275,7 +279,8 @@ Con `layer` a secas:
 ### Paridad y límites
 
 - `node test/layers-parity.mjs <scene_layout.json> [--webgl]` renderiza cada escena al tamaño del lienzo (1:1) con la cámara en reposo y la compara contra `previews/SCENE_XX.png`, con la guía incluida, con `autoTiming` al final de la escena y sin guía contra una composición de referencia. Da media, p99 y max por escena, y falla con max > 1/255.
-- Para lograr diferencia 0 las capas se decodifican sin premultiplicar (`createImageBitmap`, `premultiplyAlpha: 'none'`), el shader premultiplica en float y los buffers de la viñeta son de 8 bits. Cada capa se redondea al mezclarse, igual que en Photoshop. Consecuencia: en una viñeta por capas el glow/bloom de los VFX trabaja con 8 bits por canal.
+- Para lograr diferencia 0 las capas se decodifican sin premultiplicar (`createImageBitmap`, `premultiplyAlpha: 'none'`), el shader premultiplica en float y los buffers de la viñeta son de 8 bits. Cada capa se redondea al mezclarse, igual que en Photoshop. Si la viñeta tiene VFX, el buffer de la escena pasa a half float (el glow aditivo y el bloom necesitan más de 8 bits); en esas viñetas las capas pueden correrse ≤ 1/255 en bordes suaves.
+- Mipmaps: las capas no van premultiplicadas, así que los mipmaps de la GPU promediarían el RGB de los píxeles transparentes (halos oscuros o de color al achicar). Se arman en JS (en Workers): cada nivel es el promedio ponderado por alfa y los píxeles con alfa 0 toman el color de la zona con dibujo más cercana. Los píxeles con alfa > 0 del nivel 0 no cambian: en reposo 1:1 la paridad sigue siendo exacta.
 - Todas las capas se mezclan en modo normal con opacidad 1. `comic layers` avisa si el PSD traía otro modo u opacidad.
 - Los fondos no se agrandan solos (no hay overscan automático). Si un fondo a sangre deja ver su borde al panear, bajá `depthScale`, acercá ese fondo (`depth` más alto) o limitá la cámara. `comic check --gaps` encuentra esos instantes y `move3d` se limita solo (ver "Cámara 3D (move3d) y límites"; ver fuera de la viñeta sobre el marco negro de la página no cuenta como hueco).
 
@@ -294,7 +299,7 @@ Con `layer` a secas:
 | `from`, `to`, `dof` | rackFocus: capas (o depth) de foco inicial y final (default: el fondo → el objetivo) e intensidad del desenfoque |
 | `bounds` | qué cuenta como hueco: `art` (default), `panel` o `page` (ver "Qué es un hueco") |
 | `keepText` | `true` (default): los textos visibles (rol `text`) quedan enteros dentro del cuadro con 24 px de margen |
-| `shots` | encadenado `[{at, dur, move, target, amount, direction, ease, zoom}]`: cada tramo arranca donde terminó el anterior |
+| `shots` | encadenado `[{at, dur, move, target, amount, direction, ease, zoom}]`: cada tramo arranca donde terminó el anterior. Un tramo con `at` ≥ la duración del clip, que termina después del clip o que se pisa con el anterior es aviso del plan y **error** de `comic check` |
 
 | move | amount = 1 | encuadre base |
 |---|---|---|
@@ -331,7 +336,11 @@ El objetivo de una capa es el centro del **bbox de su alfa real** (si se midió,
 
 Default `art` porque es lo que el espectador percibe como error; `panel`/`page` quedan para quien quiere el encuadre dentro de la caja a propósito (p. ej. páginas con fondo de papel y escenario de otro color sin datos medidos).
 
-**Datos de píxeles.** `art` necesita saber qué es marco y dónde hay dibujo. `comic layers` (al importar), `comic ingest` (imágenes) y **`comic tags`** (para proyectos existentes: mide todos los assets) guardan en el asset: por capa `alpha` (bbox del alfa real, si es más chico que el de la capa), `solid` (`#rrggbb` si la capa es de un solo color), `grid` (celdas con dibujo, base64) y `hull` (contorno por franjas, base64); por imagen plana `edges` (`{color, band, n, bands}`: franja pareja por lado y por tramo). Sin esos datos, `art` cae a `panel` en los lados que no se ven en reposo y `check --gaps` lo avisa (`corré comic tags`). Con `alpha`/`grid` la cobertura y el tamaño/centro del objetivo usan el alfa real y no el bbox del PNG (un PNG con mucho margen transparente ya no da un falso "cubierto").
+**Datos de píxeles.** `art` necesita saber qué es marco y dónde hay dibujo. `comic layers` (al importar), `comic ingest` (imágenes) y **`comic tags`** (para proyectos existentes: mide todos los assets) guardan en el asset: por capa `alpha` (bbox del alfa real, si es más chico que el de la capa), `solid` (`#rrggbb` si la capa es de un solo color), `grid` (celdas con dibujo: `{cell, cols, rows, rle}`, hasta 128 celdas por lado y celdas de ≥ 4 px, en RLE base64; los datos viejos con `bits` crudos a 64 celdas se siguen leyendo) y `hull` (contorno por franjas, base64); por imagen plana `edges` (`{color, band, n, bands}`: franja pareja por lado y por tramo). Además, en el asset, `bounds: { v, measured, files: { <archivo>: "tamaño:mtime:sha1[@x,y]" } }`: la **marca de medido** (un asset medido cuenta como "con datos" aunque no tenga ninguna capa sólida ni franja pareja: entonces no hay marco y lo que la caja corta se mide como dibujo) y la **huella** de cada PNG. Sin datos, `art` cae a `panel` en los lados que no se ven en reposo y lo avisan `move3d` (por `ctx.warn`: llega a `player.warnings` y al inspector del clip) y `check --gaps` (`comic tags` los mide; los videos no se miden). Con `alpha`/`grid` la cobertura y el tamaño/centro del objetivo usan el alfa real y no el bbox del PNG (un PNG con mucho margen transparente ya no da un falso "cubierto").
+
+**Datos desactualizados.** Si se reemplaza un PNG/imagen a mano (o se mueve una capa en el lienzo), `comic check` avisa `datos de bordes desactualizados para <asset>: corré comic tags` (compara tamaño y mtime; si solo cambió el mtime —una copia del proyecto— compara el sha1). `comic tags` vuelve a medir **solo lo que cambió** (`--reset`: todo); sin cambios no toca `scene.json`. Datos medidos con una versión anterior (sin `bounds`, o `v` distinta) también se avisan y se recalculan enteros.
+
+**Dónde viven.** En `scene.json`, en el asset, y no en archivos aparte: así preview, export y `check` los ven sin cargar nada más y no hay que mantener otro archivo en sincronía. La grilla en RLE a 128 celdas pesa menos que la de bits crudos a 64 (en un proyecto de 4 viñetas por capas, 28 capas: `scene.json` +2 % respecto de los datos viejos). No entran en el hash de aprobación (son del asset), y los prompts del generador y del guiado los sacan (`assetsForPrompt`, copia saneada `scene.prompt.json`).
 
 **Textos (`keepText`, default `true`).** Mientras una capa `text` se ve (según su `at`/`enter`/`exit`/`autoTiming`; un texto que entra más tarde cuenta recién desde que aparece), `move3d` la mantiene **entera** dentro del cuadro con 24 px de margen (4 px en `breathe`/`handheld`, que van encima de un encuadre que ya los dejó), medida ya asentada (sin el pop de entrada). Nunca pide más margen del que el texto tenía al arrancar el tramo (un cartel pegado al borde de la página en reposo se mide con el suyo); si ya arranca cortado, no se exige y se avisa. Los textos se miden con la cámara de `move3d` sola (una sacudida que asoma un cartel medio segundo no es un encuadre); los huecos, con los efectos encima. `keepText: false` lo apaga.
 
@@ -343,14 +352,16 @@ Default `art` porque es lo que el espectador percibe como error; `panel`/`page` 
 
 **Siempre con aviso** (`ctx.warn`, `player.warnings`, `rt.warnings`/`rt.limits` y `comic check --gaps`): `truck: amount limitado a 0.22 (pedido 1) para no ver bordes`, `pushIn: encuadre corrido 187 px de página para que <texto> entre entero (keepText)`. Las cámaras viejas (`camera`, `dolly`, `shake`…) no se tocan: solo las revisa `check --gaps`.
 
-**`comic check <dir> --gaps [fps]`** muestrea cada escena (4 fps por defecto) con la cámara compuesta (la misma función que el player, sin navegador) y la **misma definición de hueco** (`bounds` de la cámara `move3d` de la escena; `art` si no hay), y reporta, con tiempos locales a la escena:
+**`comic check <dir> --gaps [fps] [--bounds art|panel|page]`** muestrea cada escena (4 fps por defecto) con la cámara compuesta (la misma función que el player, sin navegador) y la **misma definición de hueco** (`bounds` de la cámara `move3d` de la escena; `art` si no hay; `--bounds` la fuerza para todas las escenas), y reporta, con tiempos locales a la escena:
 - `s3 t=5.25–6.00s (peor en 5.50s): se ve el borde derecho de <fondo> (−34 px)` (transparencia entre los fondos de una viñeta por capas);
 - `se ve fuera de la viñeta <id> y corta <capa>` (`art`) / `se ve fuera de la viñeta <id>` / `fuera de la página` (`panel`/`page`);
 - textos (rol `text`) cortados por el borde del cuadro o de su viñeta durante ≥ 0.5 s, o que aparecen (`at > 0`) enteros fuera de cuadro; globos DOM cortados;
 - VFX con `region` fuera de su viñeta;
 - los avisos de `move3d` y los assets sin datos de píxeles.
 
-Se saltean los tramos de entrada/salida de las viñetas. La grilla del alfa es gruesa (≤ 64 celdas por lado): una transparencia más chica que una celda dentro de un fondo puede pasar como cubierta. Sin `--gaps`, `check` no cambia.
+Se saltean los tramos de entrada/salida de las viñetas. La grilla del alfa tiene hasta 128 celdas por lado (celdas de ~15 px en un fondo de 1900 px): una transparencia más chica que una celda dentro de un fondo puede pasar como cubierta. Sin `--gaps`, `check` igual avisa los datos de bordes desactualizados y los `shots` mal encadenados.
+
+**Memo del plan.** El plan de `move3d` (5–150 ms según la escena) se memoriza entre rebuilds del player por un hash de los params y tiempos del clip, su semilla, las viñetas de la escena y los assets que usan, los efectos de cámara de la escena, `stage`, tamaño del cuadro y fps (Map de módulo, 48 entradas, LRU). Editar otra escena no lo recalcula; los avisos se repiten por `ctx.warn`. Es el mismo plan que se calcularía: el render no cambia.
 
 ## Recetas de escena
 

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { SKILL_DIR } from './project.js';
 import { runClaude } from './claude.js';
-import { targetContext, writeCatalog } from './generator.js';
+import { targetContext, writeCatalog, writePromptScene } from './generator.js';
 import { layersSummary } from './recipes/geometry.js';
 import { listRecipes } from './recipes/index.js';
 import { findTarget, activeVariant, assetsForPrompt } from './shared/scene.js';
@@ -107,8 +107,10 @@ export function createGuides(project, { queue, onChange }) {
     return save(g);
   }
 
-  // Aplica el cierre: guarda la dirección y, si hay instrucción y target, encola el pedido.
-  function apply(id, { count, kind } = {}) {
+  // Aplica el cierre: guarda la dirección y, si hay instrucción, encola el pedido: al target de la sesión o, si la
+  // sesión es de proyecto (target null), uno por cada escena elegida en el diálogo (scenes). La cola ya corre en
+  // paralelo entre escenas distintas.
+  function apply(id, { count, kind, scenes } = {}) {
     const g = must(id, 'done');
     const res = g.result;
     const { scene, rev } = project.read();
@@ -124,21 +126,37 @@ export function createGuides(project, { queue, onChange }) {
       newRev = project.write(scene, rev);
       project.history([{ ts: new Date().toISOString(), action: 'direction', target: g.target, direction: dir0, guide: g.id }]);
     }
-    let request = null;
-    if (g.target && res.instruction) {
+    const targets = [];
+    if (res.instruction) {
+      if (g.target) targets.push(g.target);
+      else
+        for (const sid of [...new Set(Array.isArray(scenes) ? scenes : [])]) {
+          if (!scene.scenes.some((x) => x.id === sid)) throw httpError(400, 'escena no encontrada: ' + sid);
+          targets.push({ scene: sid });
+        }
+    }
+    const requests = [];
+    if (targets.length) {
       if (!queue) throw httpError(400, 'cola deshabilitada');
       const max = scene.meta.maxVariants || 3;
-      request = queue.add({
-        target: g.target,
-        kind: kind === 'retouch' || kind === 'variants' ? kind : res.kind,
-        count: Math.max(1, Math.min(max, +count || res.count)),
-        instruction: res.instruction,
-      });
+      for (const target of targets) {
+        // queue.add arma el id con Date.now(): dos pedidos en el mismo milisegundo se pisarían
+        const t0 = Date.now();
+        while (requests.length && Date.now() === t0);
+        requests.push(
+          queue.add({
+            target,
+            kind: kind === 'retouch' || kind === 'variants' ? kind : res.kind,
+            count: Math.max(1, Math.min(max, +count || res.count)),
+            instruction: res.instruction,
+          }),
+        );
+      }
     }
     g.status = 'applied';
-    g.applied = { at: new Date().toISOString(), direction: dir0, request: request?.id || null };
+    g.applied = { at: new Date().toISOString(), direction: dir0, request: requests[0]?.id || null, requests: requests.map((r) => r.id) };
     save(g);
-    return { session: g, request, rev: newRev };
+    return { session: g, request: requests[0] || null, requests, rev: newRev };
   }
 
   function buildContext(scene, target) {
@@ -194,11 +212,13 @@ export function createGuides(project, { queue, onChange }) {
       const guideFile = path.join(gdir, 'guide.json');
       fs.writeFileSync(guideFile, JSON.stringify({ target: g.target, instruction: g.instruction, transcript: g.transcript, finish: g.finish, context: buildContext(scene, g.target) }, null, 2));
       const catalogFile = writeCatalog(project);
+      // copia saneada de scene.json para el modelo (misma que el generador: sin los datos de píxeles de los límites)
+      const sceneFile = writePromptScene(scene, path.join(outDir, 'scene.prompt.json'));
       const turnFile = path.join(outDir, 'turn.json');
       const prompt = [
         `Sos el entrevistador del modo guiado de la skill comic-motion (turno ${g.turn}, headless desde el panel).`,
         `1. Leé ${path.join(SKILL_DIR, 'references', 'guiado.md')} y seguí sus reglas y la sección "Modo panel" al pie de la letra.`,
-        `2. La sesión está en ${guideFile} (target, instruction, transcript, finish, context). El catálogo de presets en ${catalogFile}. La escena entera en ${project.scenePath} (solo lectura). Mirá las imágenes que necesites para recomendar (el archivo del asset o su contactSheet si es video).`,
+        `2. La sesión está en ${guideFile} (target, instruction, transcript, finish, context). El catálogo de presets en ${catalogFile}. La escena entera en ${sceneFile} (scene.json sin los datos de píxeles de los límites; solo lectura: usá esa copia, no el scene.json del proyecto). Mirá las imágenes que necesites para recomendar (el archivo del asset o su contactSheet si es video).`,
         `3. Escribí exactamente un archivo: ${turnFile}, con "type": "question" (una sola pregunta, 2 a 4 opciones, la recomendada primera) o "type": "done".`,
         g.finish ? `El usuario pidió cerrar ya ("finish": true): turn.json tiene que ser "done"; completá lo que falte con tus recomendaciones y decí en el summary cuáles asumiste.` : '',
         `No modifiques ningún otro archivo. Terminá con una línea de resumen.`,

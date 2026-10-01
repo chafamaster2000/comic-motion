@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 
 export const Backdrop = ({ onClose, children, side }) => (
@@ -7,7 +7,7 @@ export const Backdrop = ({ onClose, children, side }) => (
   </motion.div>
 );
 
-export function ExportDialog({ studio, render, onClose, loop, scene, validation }) {
+export function ExportDialog({ studio, render, onClose, loop, scene, validation, playerWarnings = [], goTo }) {
   const [quality, setQuality] = useState('1080');
   const [codec, setCodec] = useState('h264');
   const [range, setRange] = useState('all');
@@ -15,6 +15,22 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation 
   const running = render.status === 'running';
   const pending = scene.scenes.filter((s) => !s.variants.some((v) => v.status === 'approved'));
   const pct = running ? Math.round(((render.frame || 0) / (render.frames || 1)) * 100) : 0;
+  // cuántos navegadores usaría Auto en esta máquina (núcleos, RAM libre, calidad y largo del tramo)
+  const [plan, setPlan] = useState(null);
+  const useLoop = range === 'loop' && loop;
+  useEffect(() => {
+    const q = new URLSearchParams({ quality, ...(useLoop ? { from: loop[0], to: loop[1] } : {}) });
+    let alive = true;
+    fetch('/api/render/plan?' + q)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => alive && setPlan(d))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [quality, useLoop, loop?.[0], loop?.[1]]);
+  const autoTip = plan ? `Auto: ${plan.n} en esta máquina (límite por ${plan.limit}; ${plan.availGB} GB disponibles, ~${plan.perWorkerGB} GB por navegador a ${quality === '4k' ? '4K' : '1080p'})` : 'según núcleos y memoria libre (hasta 4)';
+  const camWarnings = playerWarnings;
   return (
     <Backdrop onClose={onClose}>
       <motion.div className="dialog" initial={{ y: 30, scale: 0.97 }} animate={{ y: 0, scale: 1 }} exit={{ y: 30, scale: 0.97 }}>
@@ -32,6 +48,27 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation 
         {pending.length > 0 && (
           <div className="warnbox">
             {pending.length} escena(s) sin aprobar: {pending.map((s) => s.title || s.id).join(', ')}. Se exporta lo que está en pantalla.
+          </div>
+        )}
+        {camWarnings.length > 0 && (
+          <div className="warnbox">
+            {camWarnings.length} aviso(s) de cámara/límites (el export sale igual, con estos ajustes):
+            <ul className="warn-list">
+              {camWarnings.slice(0, 8).map((w) => {
+                const m = /^([^/]+)\/([^:]+): (.*)$/.exec(w);
+                return (
+                  <li key={w}>
+                    {m && goTo ? (
+                      <button className="linkish" onClick={() => goTo({ scene: m[1], clip: m[2] })} title="Ir al clip">
+                        {m[1]}/{m[2]}
+                      </button>
+                    ) : null}
+                    {m ? ': ' + m[3] : w}
+                  </li>
+                );
+              })}
+              {camWarnings.length > 8 && <li className="dim">y {camWarnings.length - 8} más (contador ⚠ de la barra)</li>}
+            </ul>
           </div>
         )}
         <div className="opts">
@@ -64,8 +101,8 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation 
             <span>En paralelo</span>
             <div className="seg">
               {['auto', 1, 2, 3, 4].map((w) => (
-                <button key={w} className={workers === w ? 'on' : ''} onClick={() => setWorkers(w)} disabled={running} title={w === 'auto' ? 'según los núcleos de la máquina (hasta 4)' : `${w} navegador(es) renderizando tramos a la vez`}>
-                  {w === 'auto' ? 'Auto' : w}
+                <button key={w} className={workers === w ? 'on' : ''} onClick={() => setWorkers(w)} disabled={running} title={w === 'auto' ? autoTip : `${w} navegador(es) renderizando tramos a la vez`}>
+                  {w === 'auto' ? (plan ? `Auto (${plan.n})` : 'Auto') : w}
                 </button>
               ))}
             </div>
@@ -98,6 +135,7 @@ export function ExportDialog({ studio, render, onClose, loop, scene, validation 
           </div>
         )}
         {render.status === 'error' && <div className="warnbox bad">Falló: {render.error}</div>}
+        {render.status === 'cancelled' && <div className="warnbox">Export cancelado: no quedó ningún archivo a medias.</div>}
         <div className="dialog-actions">
           <button className="btn ghost" onClick={onClose}>
             Cerrar

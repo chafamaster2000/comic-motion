@@ -4,7 +4,7 @@ export const LAYERS = ['back', 'mid', 'front'];
 // Params comunes. `layer` solo para los que dibujan geometría; `anchor` para los que nacen en un punto.
 export function common({ layer = 'mid', anchor = false, style = false } = {}) {
   const out = [{ key: 'target', label: 'Viñeta (clip id; vacío = la primera de la escena)', type: 'clipRef', default: null }];
-  if (anchor) out.push({ key: 'anchor', label: 'Punto [x,y] en la página (vacío = centro de la viñeta)', type: 'anchor', default: null });
+  if (anchor) out.push({ key: 'anchor', label: 'Punto [x,y] en la página, "@tag" / "layer:<id>" (centro de la capa) o ["@tag", fx, fy] (vacío = centro de la viñeta)', type: 'anchor', default: null });
   if (layer)
     out.push(
       { key: 'layer', label: 'Capa', type: 'select', options: LAYERS, default: layer },
@@ -20,10 +20,21 @@ export function common({ layer = 'mid', anchor = false, style = false } = {}) {
   return out;
 }
 
-// Rect de la viñeta destino y ancla por defecto (centro).
+// Rect de la viñeta destino y ancla en px de página. `anchor`: [x, y] en px, o una capa de la viñeta por capas:
+// "@tag" / "layer:<id>" (centro del bbox del alfa) o ["@tag", fx, fy] (punto relativo a ese bbox, 0..1).
+// Vacío (o una capa que no resuelve, con aviso) = centro de la viñeta.
 export function targetInfo(ctx) {
   const rect = ctx.panelRect(ctx.gpu.target) || [0, 0, ctx.stage.w, ctx.stage.h];
-  const anchor = ctx.params.anchor || [rect[0] + rect[2] / 2, rect[1] + rect[3] / 2];
+  const center = [rect[0] + rect[2] / 2, rect[1] + rect[3] / 2];
+  const a = ctx.params.anchor;
+  let anchor = center;
+  if (Array.isArray(a) && typeof a[0] === 'number') anchor = a;
+  else if (typeof a === 'string' || (Array.isArray(a) && typeof a[0] === 'string')) {
+    const [ref, fx = 0.5, fy = 0.5] = Array.isArray(a) ? a : [a];
+    const p = ctx.gpu.layerPoint?.(ref, fx, fy);
+    if (p) anchor = p;
+    else ctx.warn?.(`anchor ${JSON.stringify(a)} no resuelve a una capa de la viñeta ${ctx.gpu.target} (se usa el centro)`);
+  }
   return { rect, anchor };
 }
 

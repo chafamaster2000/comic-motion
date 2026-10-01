@@ -4,10 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { openProject, catalog, validate, SKILL_DIR, Conflict } from './project.js';
-import { reviewAction } from './shared/scene.js';
+import { reviewAction, layoutScenes } from './shared/scene.js';
 import { createQueue } from './generator.js';
 import { createGuides } from './guide.js';
-import { renderVideo } from './render.js';
+import { renderVideo, autoWorkers } from './render.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -208,7 +208,7 @@ export function startServer({ projectDir, port = 0, host = '127.0.0.1', withQueu
           if (action === 'retry') return json(res, 200, guides.retry(id));
           if (action === 'cancel') return json(res, 200, guides.cancel(id));
           if (action === 'apply') {
-            const r = guides.apply(id, { count: body.count, kind: body.kind });
+            const r = guides.apply(id, { count: body.count, kind: body.kind, scenes: body.scenes });
             if (r.rev) {
               lastRev = r.rev;
               send('scene', { rev: r.rev });
@@ -223,6 +223,16 @@ export function startServer({ projectDir, port = 0, host = '127.0.0.1', withQueu
         }
       }
       if (p === '/api/render' && req.method === 'GET') return json(res, 200, render);
+      // cuántos navegadores usaría 'auto' para este tramo y calidad (el diálogo lo muestra en el botón Auto)
+      if (p === '/api/render/plan' && req.method === 'GET') {
+        const { scene } = project.read();
+        const l = layoutScenes(scene);
+        const dur = l.length ? Math.max(...l.map((e) => e.end)) : 0;
+        const from = +url.searchParams.get('from') || 0;
+        const to = url.searchParams.has('to') ? Math.min(+url.searchParams.get('to'), dur) : dur;
+        const frames = Math.max(1, Math.round((to - from) * (scene.meta.fps || 24)));
+        return json(res, 200, { frames, ...autoWorkers(frames, url.searchParams.get('quality') === '4k' ? '4k' : '1080') });
+      }
       if (p === '/api/render/cancel' && req.method === 'POST') {
         stopRender = true;
         return json(res, 200, { ok: true });

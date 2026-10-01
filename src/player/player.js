@@ -5,6 +5,7 @@ import { BUILTIN, defaultsOf, withPanelDefaults } from './presets.js';
 import { easing } from './ease.js';
 import { mix } from 'motion';
 import { createGpuSystem } from './gpu/engine.js';
+import { presentedFrame } from './media.js';
 import { vfxNeeds } from './vfx/index.js';
 import { cameraResultsAt, composeCamera, holdsView } from './camera3d.js';
 
@@ -65,6 +66,7 @@ export function createPlayer(root, opts) {
   const listeners = new Set();
   const pending = new Set(); // imágenes por decodificar
   let gpu = null; // sistema GPU (three) si alguna viñeta lo necesita
+  let videoFrameTimeouts = 0; // seeks de video en los que requestVideoFrameCallback no llegó (diagnóstico)
   let draft = false;
 
   const W = () => scene.meta.width;
@@ -165,7 +167,7 @@ export function createPlayer(root, opts) {
       }
       // camDof: algún clip de cámara (move3d rackFocus) empuja el foco del DOF → el rig prepara el desenfoque
       const camDof = clips.some(({ clip, variant }) => clip.track === 'camera' && presets[variant.preset]?.usesDof?.(variant.params));
-      const sref = { key: entry.scene.id, visible: false, camDof };
+      const sref = { key: entry.scene.id, visible: false, camDof, stage };
       // viñetas de la escena para las cámaras (move3d: objetivos por capa y límites)
       const scenePanels = clips.filter(({ clip }) => clip.track === 'panel').map(({ clip, variant }) => ({ id: clip.id, start: variant.start || 0, duration: variant.duration || 0, params: { ...defaultsOf(presets.panel), ...(variant.params || {}) } }));
       // efectos de cámara de la escena (shake, dutch, dolly): move3d los incluye en su límite; se llenan al final
@@ -398,10 +400,22 @@ export function createPlayer(root, opts) {
         new Promise((res) => {
           const ready = () => v.video.readyState >= 2 && !v.video.seeking;
           if (ready() && Math.abs(v.video.currentTime - target) <= 0.001) return res();
+          // cuadro presentado (requestVideoFrameCallback, media.js): la GPU copia el cuadro buscado y no el anterior
+          const shown = presentedFrame(v.video);
+          let fin = false;
           const done = () => {
+            if (fin) return;
+            fin = true;
             v.video.removeEventListener('seeked', done);
             v.video.removeEventListener('loadeddata', done);
-            res();
+            // después del cuadro presentado, la GPU dibuja en el rAF siguiente (dibujando en la misma vuelta del
+            // callback del video a veces se captura el cuadro anterior)
+            const after = () => requestAnimationFrame(() => res());
+            if (!shown) return after();
+            shown.then((r) => {
+              if (r.via !== 'rvfc') videoFrameTimeouts++;
+              after();
+            });
           };
           v.video.addEventListener('seeked', done);
           v.video.addEventListener('loadeddata', done);
@@ -414,7 +428,6 @@ export function createPlayer(root, opts) {
     if (gpu) {
       // la GPU dibuja con las texturas y videos ya listos y el export espera a que termine
       await gpu.whenReady();
-      if (built.videos.length) await new Promise((r) => requestAnimationFrame(r));
       renderGpu();
       await gpu.finish();
     }
@@ -487,6 +500,10 @@ export function createPlayer(root, opts) {
     },
     get gpuPanelCount() {
       return gpu ? gpu.panels.size : 0;
+    },
+    // seeks de video en los que no llegó requestVideoFrameCallback (se esperó el timeout)
+    get videoFrameTimeouts() {
+      return videoFrameTimeouts;
     },
     // espera a que las viñetas GPU estén inicializadas (devuelve el backend)
     async gpuReady() {

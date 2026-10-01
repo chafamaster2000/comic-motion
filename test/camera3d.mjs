@@ -418,5 +418,192 @@ const textSlackMin = (r, from = 0, to = 4) => {
   const g2 = checkGaps(old, presets, { fps: 24 });
   ok(g2.issues.some((i) => i.kind === 'page' || i.kind === 'edge'), 'cámara vieja + shake sobre el encuadre de reposo: check avisa');
 }
+// ---------- datos de píxeles: marca de medido, huellas, grilla RLE (pixel-bounds.js) ----------
+{
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const sharp = (await import('sharp')).default;
+  const { annotateAssetBounds, boundsStatus, boundsWarnings, layerPixelInfo, GRID_MAX } = await import('../src/pixel-bounds.js');
+  const { gridHas, hasFrameData } = await import('../src/player/bounds.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'comic-bounds-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'assets'));
+    // PNG RGBA w×h con dibujo opaco (color c) donde draw(x, y)
+    // (con un degradé en el rojo: ninguna capa de un solo color)
+    const png = async (file, w, h, draw, c = [200, 40, 40]) => {
+      const buf = Buffer.alloc(w * h * 4);
+      for (let y = 0; y < h; y++)
+        for (let x = 0; x < w; x++)
+          if (draw(x, y)) {
+            const i = (y * w + x) * 4;
+            buf[i] = (c[0] + x) & 255;
+            buf[i + 1] = c[1];
+            buf[i + 2] = c[2];
+            buf[i + 3] = 255;
+          }
+      await sharp(buf, { raw: { width: w, height: h, channels: 4 } }).png().toFile(path.join(dir, file));
+    };
+    // fondo: triángulo (viñeta inclinada) de 600×400; personaje: disco; ninguna capa de un solo color liso del escenario
+    await png('assets/bg.png', 600, 400, (x, y) => x / 600 + y / 400 < 1.2, [30, 90, 160]);
+    await png('assets/ch.png', 300, 300, (x, y) => (x - 150) ** 2 + (y - 150) ** 2 < 120 ** 2);
+    const asset = () => ({ type: 'layers', w: 600, h: 400, file: 'x.png', layers: [
+      { id: 'bg', file: 'assets/bg.png', x: 0, y: 0, w: 600, h: 400, z: 0, role: 'background', depth: 0.4 },
+      { id: 'ch', file: 'assets/ch.png', x: 150, y: 50, w: 300, h: 300, z: 1, role: 'character', depth: 0.9, tags: ['hero'] },
+    ] });
+    // 7) grilla RLE hasta GRID_MAX celdas: decodifica igual que el alfa real (muestras lejos del borde del dibujo)
+    const info = await layerPixelInfo(path.join(dir, 'assets/bg.png'));
+    ok(info.grid && info.grid.rle && !info.grid.bits, 'grid v2: en RLE');
+    ok(Math.max(info.grid.cols, info.grid.rows) <= GRID_MAX && Math.max(info.grid.cols, info.grid.rows) > 64, `grid v2: más fina que 64 celdas (${info.grid.cols}×${info.grid.rows})`);
+    const lay = { x: 0, y: 0, w: 600, h: 400, alpha: info.alpha[2] < 600 || info.alpha[3] < 400 ? info.alpha : undefined, grid: info.grid };
+    let bad = 0;
+    for (let y = 2; y < 400; y += 7)
+      for (let x = 2; x < 600; x += 7) {
+        const v = x / 600 + y / 400;
+        if (Math.abs(v - 1.2) < 0.04) continue;
+        if (gridHas(lay, x, y) !== v < 1.2) bad++;
+      }
+    ok(bad === 0, `grid v2: gridHas coincide con el alfa (${bad} muestras distintas)`);
+    // 1) marca de medido: sin ninguna capa sólida, el asset igual cuenta como medido (no repite "comic tags los mide")
+    const a = asset();
+    const m0 = panelModel({ id: 'p1', params: { ...panelParams, crop: null }, asset: a, start: 0, duration: 4, stage, W, H });
+    ok(!hasFrameData(m0), 'sin medir: no hay datos del marco');
+    const rep = { measured: [], kept: [] };
+    await annotateAssetBounds(dir, a, { report: rep });
+    ok(a.bounds && a.bounds.v >= 2 && a.bounds.measured && Object.keys(a.bounds.files).length === 2, 'annotateAssetBounds: deja la marca bounds { v, measured, files }');
+    ok(!a.layers.some((l) => l.solid), 'el asset de prueba no tiene capas sólidas');
+    const m1 = panelModel({ id: 'p1', params: { ...panelParams, crop: null }, asset: a, start: 0, duration: 4, stage, W, H });
+    ok(hasFrameData(m1), 'medido sin capa sólida: hasFrameData por la marca');
+    const pw = (as) => {
+      const { ctx, warnings } = ctxFor({ move: 'pushIn', target: '@hero', amount: 0.3 }, { asset: as });
+      ctx.panels[0].params = { ...panelParams, crop: null };
+      planMove3d(ctx);
+      return warnings;
+    };
+    ok(!pw(a).some((w) => /datos del marco/.test(w)), 'move3d: un asset medido sin marco liso no avisa "sin datos del marco"');
+    // 3) sin datos: move3d avisa por ctx.warn (llega a player.warnings) que esa viñeta se evalúa como 'panel'
+    ok(pw(asset()).some((w) => /no tiene datos del marco.*bounds 'panel'.*comic tags/.test(w)), 'move3d: sin datos del marco avisa por ctx.warn (cae a panel)');
+    // 2) huellas: sin cambios → ok; PNG reemplazado → desactualizado (check) y tags recalcula solo esa capa
+    ok(boundsStatus(dir, a).state === 'ok', `huellas: recién medido = ok (${JSON.stringify(boundsStatus(dir, a))})`);
+    const before = JSON.stringify(a);
+    const rep2 = { measured: [], kept: [] };
+    await annotateAssetBounds(dir, a, { report: rep2 });
+    ok(rep2.measured.length === 0 && rep2.kept.length === 2 && JSON.stringify(a) === before, 'tags sin cambios: no mide nada ni toca el asset');
+    // mismo contenido con otro mtime (copia del proyecto): sigue al día (compara el sha1)
+    const t = new Date(Date.now() - 86400e3);
+    fs.utimesSync(path.join(dir, 'assets/ch.png'), t, t);
+    ok(boundsStatus(dir, a).state === 'ok', 'huellas: otro mtime con el mismo contenido = al día');
+    await png('assets/ch.png', 300, 300, (x, y) => x < 100 && y < 200); // reemplazado a mano
+    const st = boundsStatus(dir, a);
+    ok(st.state === 'stale' && st.files.join() === 'assets/ch.png', `huellas: PNG reemplazado = desactualizado (${JSON.stringify(st)})`);
+    const bw = boundsWarnings(dir, { x: a });
+    ok(bw.length === 1 && /datos de bordes desactualizados para x.*comic tags/.test(bw[0]), `check: avisa datos de bordes desactualizados (${bw.join(' | ')})`);
+    const rep3 = { measured: [], kept: [] };
+    await annotateAssetBounds(dir, a, { report: rep3 });
+    ok(rep3.measured.join() === 'ch' && rep3.kept.join() === 'bg', `tags: recalcula solo lo que cambió (${JSON.stringify(rep3)})`);
+    ok(boundsStatus(dir, a).state === 'ok' && a.layers[1].alpha && a.layers[1].alpha[2] === 100, 'tags: datos nuevos del PNG reemplazado');
+    // una capa movida en el lienzo (x/y) también es un cambio (alpha va en px del lienzo)
+    a.layers[1].x += 10;
+    ok(boundsStatus(dir, a).state === 'stale', 'huellas: capa movida = desactualizado');
+    // datos de una versión sin huellas (antes de bounds): se avisa
+    const legacy = asset();
+    legacy.layers[0].alpha = [0, 0, 10, 10];
+    ok(boundsStatus(dir, legacy).state === 'legacy' && /versión anterior/.test(boundsWarnings(dir, { y: legacy })[0] || ''), 'huellas: datos viejos sin marca = avisa');
+    // imagen plana sin franja pareja: medida (marca) aunque no haya edges
+    await png('assets/flat.png', 200, 100, () => true, [10, 200, 10]);
+    const img = { type: 'image', file: 'assets/flat.png', w: 200, h: 100 };
+    await png('assets/flat.png', 200, 100, (x, y) => (x * y) % 7 !== 0, [10, 200, 10]);
+    await annotateAssetBounds(dir, img);
+    const mf = panelModel({ id: 'p1', params: { ...panelParams, crop: null }, asset: img, start: 0, duration: 4, stage, W, H });
+    ok(img.bounds && hasFrameData(mf), 'imagen medida: hasFrameData aunque no tenga edges');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// ---------- 4) shots: tiempos fuera del clip o que se pisan ----------
+{
+  const { shotProblems } = await import('../src/player/camera3d.js');
+  const { validate } = await import('../src/project.js');
+  ok(!shotProblems({ shots: [{ at: 0, dur: 2, move: 'pushIn' }, { at: 2, move: 'breathe' }] }, 4).length, 'shots en orden y dentro del clip: sin problemas');
+  const late = shotProblems({ shots: [{ at: 0, move: 'pushIn' }, { at: 5, dur: 1, move: 'truck' }] }, 4);
+  ok(late.some((m) => /shot 2 \(truck\): arranca en 5 s, después del fin del clip \(4 s\)/.test(m)), `at > duración: avisa (${late.join(' | ')})`);
+  const over = shotProblems({ shots: [{ at: 0, dur: 3, move: 'pushIn' }, { at: 2, dur: 1, move: 'truck' }] }, 4);
+  ok(over.some((m) => /shot 2 \(truck\) se pisa con shot 1 \(pushIn\)/.test(m)), `tramos que se pisan: avisa (${over.join(' | ')})`);
+  const long = shotProblems({ shots: [{ at: 1, dur: 4, move: 'pushIn' }] }, 4);
+  ok(long.some((m) => /termina en 5 s, después del fin del clip/.test(m)), `dur que excede: avisa (${long.join(' | ')})`);
+  const { ctx, warnings } = ctxFor({ shots: [{ at: 0, dur: 3, move: 'pushIn', target: '@hero', amount: 0.2 }, { at: 2, dur: 3, move: 'breathe' }] }, { asset: layersAsset(true) });
+  planMove3d(ctx);
+  ok(warnings.some((w) => /se pisa/.test(w)) && warnings.some((w) => /termina en 5 s/.test(w)), `plan: warning claro (${warnings.join(' | ')})`);
+  const clip = (id, track, preset, start, duration, params) => ({ id, track, active: 'v1', variants: [{ id: 'v1', status: 'draft', preset, start, duration, params }] });
+  const sc = { meta: { width: W, height: H, fps: 24 }, assets: { a: layersAsset(true) }, scenes: [{ id: 's1', active: 'v1', variants: [{ id: 'v1', status: 'draft', duration: 4, clips: [clip('p', 'panel', 'panel', 0, 4, panelParams), clip('cam', 'camera', 'move3d', 0, 4, { target: '@hero', shots: [{ at: 0, move: 'pushIn' }, { at: 4.5, dur: 1, move: 'truck' }] })] }] }] };
+  const v = validate(sc, null);
+  ok(v.errors.some((e) => /cam\/v1: shot 2 \(truck\): arranca en 4.5 s/.test(e)), `check: error por shot fuera del clip (${v.errors.join(' | ')})`);
+}
+
+// ---------- 5) memo del plan entre rebuilds ----------
+{
+  const { cachedPlan, planKey, clearPlanCache, PLAN_CACHE_MAX } = await import('../src/player/camera3d.js');
+  clearPlanCache();
+  const params = { move: 'truck', target: '@hero', amount: 1 };
+  const a1 = ctxFor(params, { asset: layersAsset(true) });
+  const t0 = performance.now();
+  const p1 = cachedPlan(a1.ctx);
+  const cold = performance.now() - t0;
+  // rebuild: objetos nuevos con el mismo contenido (como al editar otra escena) → mismo plan, avisos repetidos
+  const a2 = ctxFor(params, { asset: layersAsset(true) });
+  const t1 = performance.now();
+  const p2 = cachedPlan(a2.ctx);
+  const warm = performance.now() - t1;
+  ok(p1 === p2, 'memo: mismo contenido = mismo plan (no se recalcula)');
+  ok(a1.warnings.length > 0 && JSON.stringify(a2.warnings) === JSON.stringify(a1.warnings), `memo: los avisos se repiten por ctx.warn (${a2.warnings.length})`);
+  console.log(`  plan move3d: ${cold.toFixed(1)} ms sin memo, ${warm.toFixed(2)} ms con memo`);
+  // determinismo: el plan memorizado da el mismo estado que uno nuevo
+  const fresh = planMove3d(ctxFor(params, { asset: layersAsset(true) }).ctx);
+  let same = true;
+  for (let t = 0; t <= 4; t += 0.25) same = same && JSON.stringify(move3dState(p2, t)) === JSON.stringify(move3dState(fresh, t));
+  ok(same, 'memo: el estado es idéntico al de un plan nuevo');
+  // cualquier cambio relevante cambia la clave: params, asset, viñetas, efectos de cámara, fps
+  const k0 = planKey(a2.ctx);
+  const variants = [
+    ctxFor({ ...params, amount: 0.9 }, { asset: layersAsset(true) }).ctx,
+    ctxFor(params, { asset: layersAsset(false) }).ctx,
+    (() => { const c = ctxFor(params, { asset: layersAsset(true) }).ctx; c.panels = [{ ...c.panels[0], params: { ...panelParams, depthScale: 0.5 } }]; return c; })(),
+    (() => { const c = ctxFor(params, { asset: layersAsset(true) }).ctx; c.cameraEffects = [{ clip: { id: 'hit' }, variant: { id: 'v1', preset: 'shake', start: 1, duration: 0.5, params: { intensity: 20 } }, def: { id: 'shake' }, rt: { update: () => ({}) } }]; return c; })(),
+    (() => { const c = ctxFor(params, { asset: layersAsset(true) }).ctx; c.fps = 30; return c; })(),
+  ];
+  ok(variants.every((c) => planKey(c) !== k0), 'memo: params/asset/viñetas/efectos/fps cambian la clave');
+  // el player arma el plan con move3d.build: también pasa por el memo
+  const b = ctxFor(params, { asset: layersAsset(true) });
+  const rt = move3d.build(b.ctx);
+  ok(JSON.stringify(rt.update(2)) === JSON.stringify(move3dState(p1, 2) && move3d.build(a2.ctx).update(2)) && JSON.stringify(b.warnings) === JSON.stringify(a1.warnings), 'memo: build usa el plan memorizado');
+  // límite de tamaño
+  for (let i = 0; i < PLAN_CACHE_MAX + 5; i++) cachedPlan(ctxFor({ ...params, amount: 0.01 * i }, { asset: layersAsset(true) }).ctx);
+  ok(cachedPlan(ctxFor(params, { asset: layersAsset(true) }).ctx) !== p1, 'memo: LRU con límite (el más viejo sale)');
+}
+
+// ---------- 6) check --gaps --bounds: fuerza la definición de hueco ----------
+{
+  const { checkGaps } = await import('../src/player/camera3d.js');
+  const presets = Object.fromEntries(BUILTIN.map((d) => [d.id, d]));
+  const framedAsset = { type: 'layers', w: 2000, h: 1200, file: 'x.png', layers: [
+    { id: 'paper', file: 'p.png', x: -1000, y: -600, w: 4000, h: 2400, z: 0, role: 'background', depth: 0, global: true, solid: '#000000' },
+    { id: 'art', file: 'a.png', x: 200, y: 200, w: 1600, h: 800, z: 1, role: 'background', depth: 0.4 },
+  ] };
+  const clip = (id, track, preset, start, duration, params) => ({ id, track, active: 'v1', variants: [{ id: 'v1', status: 'draft', preset, start, duration, params }] });
+  const sc = { meta: { width: W, height: H, fps: 24, background: '#000000' }, assets: { a: framedAsset }, scenes: [{ id: 's1', active: 'v1', variants: [{ id: 'v1', status: 'draft', duration: 2, clips: [clip('p', 'panel', 'panel', 0, 2, panelParams), clip('cam', 'camera', 'camera', 0, 2, { keys: [{ at: 0, cx: 1100, cy: 540, w: 1920 }] })] }] }] };
+  const art = checkGaps(sc, presets, { fps: 4 });
+  ok(!art.issues.length, `--gaps (art por defecto): el marco negro no es hueco (${art.issues.map((i) => i.msg).join(' | ')})`);
+  const page = checkGaps(sc, presets, { fps: 4, bounds: 'panel' });
+  ok(page.issues.some((i) => i.kind === 'page'), '--gaps --bounds panel: la misma vista sale de la viñeta');
+  // con un move3d bounds 'page' en la escena, --bounds art lo pisa
+  const sc2 = structuredClone(sc);
+  // (antes que la cámara: la vista que se ve es la de `camera`; move3d solo aporta su bounds)
+  sc2.scenes[0].variants[0].clips.splice(1, 0, clip('m3', 'camera', 'move3d', 0, 0.1, { move: 'breathe', amount: 0, bounds: 'page' }));
+  const own = checkGaps(sc2, presets, { fps: 4 });
+  const forced = checkGaps(sc2, presets, { fps: 4, bounds: 'art' });
+  ok(own.issues.length > 0 && !forced.issues.some((i) => i.kind === 'page'), `--bounds art pisa el bounds del move3d (${own.issues.length} vs ${forced.issues.length})`);
+}
+
 console.log(`${fails ? '✗' : '✓'} camera3d: ${passes} ok, ${fails} fallas`);
 process.exit(fails ? 1 : 0);

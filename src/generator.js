@@ -32,7 +32,9 @@ export function createQueue(project, { onChange }) {
     if (!holder) throw new Error('target no encontrado');
     const max = scene.meta.maxVariants || 3;
     const n = Math.max(1, Math.min(max, count || (kind === 'retouch' ? 1 : max)));
-    const id = 'r' + Date.now().toString(36);
+    // id único aunque lleguen dos pedidos en el mismo milisegundo (p.ej. el guiado encolando varias escenas)
+    let id = 'r' + Date.now().toString(36);
+    for (let k = 1; reqs.has(id); k++) id = 'r' + Date.now().toString(36) + '-' + k;
     const r = {
       id,
       kind,
@@ -113,10 +115,12 @@ export function createQueue(project, { onChange }) {
       assets: assetsForPrompt(scene.assets), // sin los datos de píxeles de los límites (base64)
     };
     fs.writeFileSync(path.join(dir, r.id, 'brief.json'), JSON.stringify(brief, null, 2));
+    // copia saneada de la escena para el modelo (sin los base64 de los límites de cámara); el scene.json real no se lee
+    const scenePrompt = writePromptScene(scene, path.join(dir, r.id, 'scene.prompt.json'));
     const prompt = [
       `Sos el generador de variantes de la skill comic-motion.`,
       `1. Leé ${path.join(SKILL_DIR, 'references', 'generator.md')} y seguí sus reglas al pie de la letra.`,
-      `2. El pedido completo está en ${path.join(dir, r.id, 'brief.json')}. El catálogo de presets en ${path.join(project.internal, 'catalog.json')}. La escena entera en ${project.scenePath} (solo lectura).`,
+      `2. El pedido completo está en ${path.join(dir, r.id, 'brief.json')}. El catálogo de presets en ${path.join(project.internal, 'catalog.json')}. La escena entera en ${scenePrompt} (scene.json sin los datos de píxeles de los límites; solo lectura: usá esa copia, no el scene.json del proyecto).`,
       `3. Escribí exactamente ${r.count} archivo(s) JSON en ${outDir}/ llamados 1.json, 2.json, … (uno por variante, nivel "${level}").`,
       `No modifiques ningún otro archivo. Terminá con una línea de resumen.`,
     ].join('\n');
@@ -187,6 +191,14 @@ export function targetContext(scene, target, fromVariant) {
         ? { sceneId: sceneHolder.id, title: sceneHolder.title, direction, duration: sceneVariant.duration, stage: sceneVariant.stage, otherClips: (sceneVariant.clips || []).filter((c) => c.id !== holder.id).map((c) => ({ id: c.id, track: c.track, label: c.label, active: activeVariant(c) })) }
         : { sceneId: sceneHolder.id, title: sceneHolder.title, direction, index: scene.scenes.indexOf(sceneHolder), totalScenes: scene.scenes.length },
   };
+}
+
+// scene.json para los prompts: igual que el real pero con assetsForPrompt (sin grid/hull/bands en base64, que no le
+// sirven al modelo y pesan decenas de KB). Devuelve la ruta.
+export function writePromptScene(scene, file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ ...scene, assets: assetsForPrompt(scene.assets) }, null, 2));
+  return file;
 }
 
 export function writeCatalog(project) {

@@ -8,7 +8,7 @@ import { TRACKS, activeVariant, nextVariantId, findTarget, layoutScenes, content
 import { vfxNeeds } from './player/vfx/index.js';
 import { unsupportedGpuFilters } from './player/gpu/filter-support.js';
 import { LAYER_ROLES, resolveLayerRef } from './player/layers.js';
-import { checkGaps as gapsOf, formatGap } from './player/camera3d.js';
+import { checkGaps as gapsOf, formatGap, shotProblems } from './player/camera3d.js';
 
 export const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -150,7 +150,7 @@ export function validate(scene, project) {
           if (m) gpuMode[tgt] = gpuMode[tgt] === 'full' || m === 'full' ? 'full' : 'overlay';
         }
         const an = av.params?.anchor;
-        if (an != null && !(Array.isArray(an) && an.length === 2 && an.every((x) => typeof x === 'number'))) errors.push(`${w3}: anchor tiene que ser [x, y] en px de página`);
+        if (an != null && !(Array.isArray(an) && an.length === 2 && an.every((x) => typeof x === 'number'))) { const ref = Array.isArray(an) ? an[0] : an; const ta = scene.assets?.[panelOf[tgt]?.params?.asset]; if (typeof ref !== 'string' || (Array.isArray(an) && !(an.length <= 3 && an.slice(1).every((x) => typeof x === 'number')))) errors.push(`${w3}: anchor tiene que ser [x, y] en px de página, "@tag" / "layer:<id>" o ["@tag", fx, fy]`); else if (ta?.type !== 'layers' || !resolveLayerRef(ta.layers, ref)) errors.push(`${w3}: anchor "${ref}" no resuelve a una capa de la viñeta ${tgt} (hace falta una viñeta por capas)`); }
         if (av.params?.layer && !['back', 'mid', 'front'].includes(av.params.layer)) errors.push(`${w3}: layer inválido ${av.params.layer} (back|mid|front)`);
         // between / z: solo en viñetas por capas
         const btw = av.params?.between;
@@ -205,6 +205,8 @@ export function validate(scene, project) {
             const refs = [cv.params?.target, ...(Array.isArray(cv.params?.shots) ? cv.params.shots.map((s) => s?.target) : [])].filter((r) => typeof r === 'string' && (r.startsWith('@') || r.startsWith('layer:')));
             const layerSets = Object.values(panelOf).map((pv) => scene.assets?.[pv.params?.asset]).filter((x) => x?.type === 'layers').map((x) => x.layers);
             for (const r of refs) if (!layerSets.some((ls) => resolveLayerRef(ls, r))) errors.push(`${w4}: target "${r}" no resuelve a ninguna capa de las viñetas por capas de la escena (comic tags)`);
+            // move3d encadenado: tramos que arrancan/terminan fuera del clip o que se pisan
+            if (cv.preset === 'move3d') for (const pr of shotProblems(cv.params, cv.duration)) errors.push(`${w4}: ${pr}`);
           }
           for (const f of cv.params?.filters || []) if (!ids.has(f.preset) && !custom.has(f.preset)) errors.push(`${w4}: filtro desconocido ${f.preset}`);
           if (cv.preset === 'camera') for (const k of cv.params?.keys || []) if (k.panel && !(v.clips || []).some((x) => x.id === k.panel)) errors.push(`${w4}: la cámara apunta a la viñeta ${k.panel} que no existe`);
@@ -353,8 +355,9 @@ export function hoistPanelDefaults(scene, { exclude = ['asset', 'layers', 'rect'
 // Muestrea cada escena a 4 fps con la cámara compuesta (misma función que el player) y devuelve líneas legibles:
 // bordes vacíos de fondos en viñetas por capas, vista fuera de la página/viñeta, textos y globos cortados,
 // regiones de VFX fuera de su viñeta, y los avisos de move3d (amount limitado). Tiempos locales a la escena.
-export function checkGaps(scene, { fps = 4 } = {}) {
+// bounds: 'art' | 'panel' | 'page' fuerza la definición de hueco (si no, la del move3d de cada escena).
+export function checkGaps(scene, { fps = 4, bounds = null } = {}) {
   const presets = Object.fromEntries(BUILTIN.map((d) => [d.id, d]));
-  const { issues, warnings } = gapsOf(scene, presets, { fps });
+  const { issues, warnings } = gapsOf(scene, presets, { fps, bounds });
   return { issues, lines: issues.map(formatGap), warnings };
 }

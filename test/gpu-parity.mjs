@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Test de paridad de antialiasing: la misma viñeta dibujada por el DOM y por la GPU (three) tiene que dar
 // los mismos píxeles a 1080p y 4K, con ken burns, zoom de cámara, profundidad 2.5D y depthLock.
-//   node test/gpu-parity.mjs [--keep] [--webgl]
-// Umbrales: media abs < 1.5/255 y p99 <= 12 por canal.
+//   node test/gpu-parity.mjs [--keep] [--webgl] [--only <caso>]
+// Umbrales: media abs < 1.5/255 y p99 <= 12 por canal (filtro ink: media < 2/255, rotado < 2.5).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -138,17 +138,23 @@ const cases = [
   { name: 'kenburns+depth', extra: {} },
   { name: 'tilt+enter', extra: { tilt: 3, enter: { preset: 'scale', duration: 1.2 } } },
   { name: 'cam-rotate+fade', extra: { enter: { preset: 'fade', duration: 1.5 }, radius: 40 }, camRot: 5 },
+  // filtro ink (contorno de tinta): líneas binarias → solo se pide la media (< 2/255; con la caja rotada
+  // Chrome lo calcula en la grilla de la caja y lo re-muestrea: < 2.5/255)
+  { name: 'ink', extra: { filters: [{ preset: 'ink' }] }, meanOnly: 2 },
+  { name: 'ink+rotate+fuerte', extra: { filters: [{ preset: 'ink', strength: 8, threshold: 0.3 }, { preset: 'css', value: 'contrast(1.2)' }] }, camRot: 5, meanOnly: 2.5 },
 ];
+const only = process.argv.includes('--only') ? process.argv[process.argv.indexOf('--only') + 1] : null;
 let fail = false;
 const rows = [];
 for (const c of cases) {
+  if (only && !c.name.startsWith(only)) continue;
   for (const scale of [1, 2]) {
     const dom = await shoot(c.name + '-dom', scene(false, c.extra, c.camRot), scale, times);
     const gpu = await shoot(c.name + '-gpu', scene(true, c.extra, c.camRot), scale, times);
     if (!gpu.gpuBackend) throw new Error('la viñeta GPU no inicializó: ' + gpu.warnings.join('; '));
     for (let i = 0; i < times.length; i++) {
       const d = await diff(dom.files[i].file, gpu.files[i].file);
-      const ok = d.mean < 1.5 && d.p99 <= 12;
+      const ok = c.meanOnly ? d.mean < c.meanOnly : d.mean < 1.5 && d.p99 <= 12;
       if (!ok) fail = true;
       rows.push({ case: c.name, res: scale === 1 ? '1080p' : '4K', t: times[i], backend: gpu.gpuBackend, mean: +d.mean.toFixed(3), p99: d.p99, p999: d.p999, max: d.max, ok });
     }

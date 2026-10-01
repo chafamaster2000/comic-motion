@@ -108,8 +108,18 @@ function FiltersField({ value, onChange, filters }) {
 }
 
 // [x, y] en coordenadas de página de la escena; se puede elegir con clic en el preview.
+// También acepta una capa: "@tag", "layer:<id>" o ["@tag", fx, fy] (punto relativo dentro de la capa).
+const isLayerRef = (v) => typeof v === 'string' || (Array.isArray(v) && typeof v[0] === 'string');
+const refText = (v) => (typeof v === 'string' ? v : v.join(' '));
+function parseRef(txt) {
+  const [ref, fx, fy] = txt.trim().split(/[\s,]+/);
+  if (!ref) return null;
+  return fx != null && fy != null ? [ref, +fx, +fy] : ref;
+}
+
 function AnchorField({ def, value, onChange, ctx }) {
-  const v = Array.isArray(value) ? value : null;
+  const ref = isLayerRef(value);
+  const v = Array.isArray(value) && !ref ? value : null;
   const picking = ctx.pickingKey === def.key;
   const set = (i, n) => {
     const next = v ? [...v] : [0, 0];
@@ -118,12 +128,22 @@ function AnchorField({ def, value, onChange, ctx }) {
   };
   return (
     <span className="anchor-field">
-      <span className="xy">
-        <b>x</b>
-        <Num value={v?.[0]} step={1} onChange={(n) => set(0, n)} />
-        <b>y</b>
-        <Num value={v?.[1]} step={1} onChange={(n) => set(1, n)} />
-      </span>
+      {ref ? (
+        <span className="xy" title='Capa: "@hero", "layer:<id>" o "@hero 0.5 0.3" (punto relativo dentro de la capa)'>
+          <b>capa</b>
+          <input type="text" defaultValue={refText(value)} key={refText(value)} onBlur={(e) => onChange(parseRef(e.target.value))} onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()} />
+        </span>
+      ) : (
+        <span className="xy">
+          <b>x</b>
+          <Num value={v?.[0]} step={1} onChange={(n) => set(0, n)} />
+          <b>y</b>
+          <Num value={v?.[1]} step={1} onChange={(n) => set(1, n)} />
+        </span>
+      )}
+      <button type="button" className="btn tiny ghost" onClick={(e) => { e.preventDefault(); onChange(ref ? [960, 540] : '@hero'); }} title={ref ? 'Pasar a coordenadas x, y' : 'Anclar a una capa (@hero, @char-1…)'}>
+        {ref ? 'x, y' : '@capa'}
+      </button>
       {ctx.pickAnchor && (
         <button type="button" className={'btn tiny pick ' + (picking ? 'on' : '')} onClick={(e) => { e.preventDefault(); ctx.pickAnchor(picking ? null : def.key); }} title="Clic en el preview para ubicarlo (tecla P). Esc cancela.">
           {picking ? '◎ apuntando… (Esc)' : '◎ Elegir en el preview'}

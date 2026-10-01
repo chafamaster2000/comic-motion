@@ -15,6 +15,7 @@ import { mulberry32 } from '../../shared/scene.js';
 import { VFX_LAYER_DEPTH, layerLayout } from '../media.js';
 import { TSL_FILTERS } from './filters.js';
 import { LayersRig } from './layers.js';
+import { resolveLayerRef } from '../layers.js';
 
 // Trabajamos en el mismo espacio que el navegador: valores sRGB tal cual, sin linealizar.
 // Así el filtrado de texturas, las mezclas y los colores hex coinciden con el DOM.
@@ -150,7 +151,10 @@ const fx = {
 // posición y velocidad en px de página a partir de dos vec4 aleatorios por partícula (generados en JS
 // con mulberry32, no en el shader) y del tiempo. Estiramiento por velocidad = desenfoque de movimiento.
 function makeParticles(api, spec) {
-  const { count, seed = 1, motion, mask = null, style = 'glow', blend = style === 'glow' ? 'add' : 'normal', shutter = 1 / 48, stretch = 1, soft = 0.35, outline = 2, outlineColor = '#111111', halo = 0.6 } = spec;
+  // cover (solo glow): fracción del alfa que tapa lo de abajo (0 = aditivo puro: sobre un fondo claro no se ve;
+  // 0.5 = la chispa conserva su color también sobre blanco). streakFade: cuánto se atenúa una partícula
+  // estirada por velocidad ((tamaño/largo)^streakFade; 0.6 conserva la energía del desenfoque de movimiento).
+  const { count, seed = 1, motion, mask = null, style = 'glow', cover = 0, streakFade = 0.6, blend = style === 'glow' && !(cover > 0) ? 'add' : 'normal', shutter = 1 / 48, stretch = 1, soft = 0.35, outline = 2, outlineColor = '#111111', halo = 0.6 } = spec;
   const n = Math.max(1, Math.floor(count));
   const rnd = mulberry32(seed >>> 0);
   const r0 = new Float32Array(n * 4);
@@ -195,7 +199,7 @@ function makeParticles(api, spec) {
     const vP = varying(wq, 'vP');
     const vL = varying(L.add(extra), 'vL');
     const vS = varying(sEff.add(extra), 'vS');
-    const vA = varying(float(m.alpha).mul(aSmall).mul(sEff.div(L).pow(0.6)), 'vA');
+    const vA = varying(float(m.alpha).mul(aSmall).mul(sEff.div(L).pow(streakFade)), 'vA');
     const vC = varying(vec3(m.color ?? vec3(1, 1, 1)), 'vC');
     // máscara opcional por fragmento en px de página (ej. recortar a la forma dibujada de la viñeta)
     const vW = mask ? varying(world, 'vW') : null;
@@ -212,7 +216,7 @@ function makeParticles(api, spec) {
         const core = clamp(float(1).sub(d).div(max(aa, soft)), 0, 1);
         const tail = exp(d.mul(d).mul(-2.2)).mul(halo);
         a = clamp(core.add(tail), 0, 1).mul(vA);
-        return vec4(vC.mul(a), 0);
+        return vec4(vC.mul(a), a.mul(cover));
       }
       const edge = clamp(float(1).sub(d).div(max(aa, soft)), 0, 1);
       a = edge.mul(vA);
@@ -362,7 +366,9 @@ class GpuPanel {
   }
 
   makeTexture(el) {
-    const tex = new THREE.Texture(el);
+    // <video>: VideoTexture (el respaldo WebGL2 de three solo sube un <video> si la textura es VideoTexture;
+    // con Texture común quedaba en blanco)
+    const tex = el.tagName === 'VIDEO' ? new THREE.VideoTexture(el) : new THREE.Texture(el);
     tex.flipY = false;
     tex.colorSpace = THREE.NoColorSpace;
     tex.premultiplyAlpha = true;
@@ -440,7 +446,9 @@ class GpuPanel {
       const L = P.sub(u.origin);
       return vec2(dot(u.fwd0.xy, L).add(u.fwd0.z), dot(u.fwd1.xy, L).add(u.fwd1.z)).div(u.frame);
     };
-    return { uv: screenUV, framePos, localPos, pagePos, pageDeltaToUv, pageToUv, pxScale: u.pxScale, pixelScale: u.pixelScale, inner: u.inner };
+    // 1 si la caja está rotada respecto del cuadro (los ejes locales no son los de la pantalla)
+    const rotated = abs(u.fwd0.y).add(abs(u.fwd1.x)).greaterThan(abs(u.fwd0.x).add(abs(u.fwd1.y)).mul(1e-4));
+    return { uv: screenUV, framePos, localPos, pagePos, pageDeltaToUv, pageToUv, pxScale: u.pxScale, pixelScale: u.pixelScale, inner: u.inner, rotated };
   }
 
   buildPipeline() {
@@ -449,7 +457,11 @@ class GpuPanel {
       this.pipeline = null;
     }
     const filters = this.mode === 'full' ? (this.info.filters || []).filter((f) => TSL_FILTERS[f.preset]) : [];
-    const scenePass = TSL.pass(this.scene, this.camera, { samples: 4, ...(this.rig ? { type: THREE.UnsignedByteType } : {}) });
+    // viñeta por capas SIN VFX: buffer de 8 bits (paridad exacta con el PSD). Con VFX, half float: el glow aditivo
+    // de las partículas y el bloom necesitan más de 8 bits (las colas tenues se redondeaban a 0 y lo brillante
+    // se saturaba antes del bloom); las capas pueden correrse ≤ 1/255 en bordes suaves, solo en esas viñetas.
+    const exact8 = this.rig && !(this.hasVfx && !globalThis.__cmVfx8);
+    const scenePass = TSL.pass(this.scene, this.camera, { samples: 4, ...(exact8 ? { type: THREE.UnsignedByteType } : {}) });
     this.scenePass = scenePass;
     const H = this.postHelpers();
     let cur = scenePass.getTextureNode();
@@ -482,7 +494,7 @@ class GpuPanel {
       const colorIn = curIsTex ? src.sample(screenUV) : cur;
       if (st.bloom) {
         const b = bloom(colorIn, st.bloom.strength, st.bloom.radius, st.bloom.threshold);
-        b.setResolutionScale?.(0.5 / Math.max(0.25, this.pixelScale || 1));
+        b.setResolutionScale?.(this.bloomScale());
         b.smoothWidth.value = 0.08;
         st.bloomNode = b;
         cur = colorIn.add(b.mul(st.enabled));
@@ -514,7 +526,33 @@ class GpuPanel {
     this.bh = Math.max(1, Math.round(this.H * s));
     this.renderer.setSize(this.bw, this.bh, false);
     this.u.pixelScale.value = s;
-    for (const st of this.posts) st.bloomNode?.setResolutionScale?.(0.5 / Math.max(0.25, s));
+    for (const st of this.posts) st.bloomNode?.setResolutionScale?.(this.bloomScale());
+  }
+
+  // Resolución del bloom: a mitad de la de la página en reposo, en px del contenido. El blur del BloomNode es
+  // de tamaño fijo en px de su buffer: si la cámara acerca 2×, el buffer se achica 2× y el halo crece igual
+  // que el dibujo (el glow se ve igual al acercarse). Cuantizado a 1/32 de octava para no re-crear los
+  // buffers en cada cuadro.
+  bloomScale() {
+    const z = Math.min(8, Math.max(0.125, this.zoomEff || 1));
+    const q = 2 ** (Math.round(Math.log2(z) * 32) / 32);
+    return Math.min(1, 0.5 / Math.max(0.25, (this.pixelScale || 1) * q));
+  }
+
+  // zoom efectivo del contenido respecto del reposo (página entera en el cuadro): px de cuadro por px de
+  // página / (ancho del cuadro / ancho del escenario). Incluye cámara, dolly y la escala de la caja.
+  updateZoom(lin) {
+    const st = this.sceneRef?.stage;
+    const fit = st?.w ? this.W / st.w : 1;
+    this.zoomEff = lin / fit;
+    for (const p of this.posts) {
+      if (!p.bloomNode) continue;
+      const sc = this.bloomScale();
+      if (sc !== p.bloomScale) {
+        p.bloomScale = sc;
+        p.bloomNode.setResolutionScale(sc);
+      }
+    }
   }
 
   // matriz local (asset k, left/top) → Matrix4 para meshes de la imagen.
@@ -612,6 +650,7 @@ class GpuPanel {
     u.inv1.value.set(inv.b, inv.d, inv.f);
     const lin = Math.sqrt(Math.abs(det));
     u.pxScale.value = lin * this.pixelScale;
+    this.updateZoom(lin);
     // viñeta por capas: proyección en perspectiva, planos y grupos de VFX los arma el rig
     if (this.rig) {
       this.rig.update(M);
@@ -708,6 +747,7 @@ class GpuPanel {
   // API ctx.gpu para un clip VFX que apunta a esta viñeta
   vfxApi(ctx, clipRuntime) {
     const panel = this;
+    panel.hasVfx = true;
     const time = uniform(0);
     const enabled = uniform(0);
     const own = [];
@@ -735,6 +775,20 @@ class GpuPanel {
       },
       // tamaño mínimo/antialias: px de dispositivo por px de página en esa capa
       layerPx: (name) => panel.layerPx[key(name)],
+      // punto de una capa de la viñeta por capas en px de página (en reposo): ref '@tag' | 'layer:<id>' | '<id>',
+      // (fx, fy) relativo al bbox del alfa de la capa (o a su bbox si no se midió). null si no resuelve.
+      layerPoint(ref, fx = 0.5, fy = 0.5) {
+        const lx = panel.info.lx;
+        const layers = panel.info.asset?.layers;
+        if (!lx?.layout0 || !Array.isArray(layers)) return null;
+        const id = resolveLayerRef(layers, ref);
+        const l = id && layers.find((q) => q.id === id);
+        if (!l) return null;
+        const [x, y, w, h] = Array.isArray(l.alpha) && l.alpha.length === 4 ? l.alpha : [l.x, l.y, l.w, l.h];
+        const L0 = lx.layout0;
+        const [ox, oy] = panel.info.origin;
+        return [ox + L0.left + L0.k * (x + fx * w), oy + L0.top + L0.k * (y + fy * h)];
+      },
       // (P) → P en px de página del fondo: para máscaras que tienen que quedar fijas al dibujo de la viñeta
       toBase: (name) => (P) => P.mul(panel.layerBase[key(name)].x).add(panel.layerBase[key(name)].yz),
       material: makeMaterial,

@@ -13,7 +13,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import sharp from 'sharp';
 import { startServer } from '../src/server.js';
-import { renderVideo } from '../src/render.js';
+import { renderVideo, autoWorkers, resolveWorkers } from '../src/render.js';
 
 const keep = process.argv.includes('--keep');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cm-export-parity-'));
@@ -139,5 +139,25 @@ try {
   if (!keep) fs.rmSync(dir, { recursive: true, force: true });
   else console.log('archivos en ' + dir);
 }
+// workers 'auto': CPU, memoria (más justa a 4K) y largo del tramo; nunca menos de 1
+{
+  const GB = 2 ** 30;
+  const m = (total, free) => ({ total: total * GB, free: free * GB });
+  const cases = [
+    [autoWorkers(1000, '1080', m(24, 4), 10).n, 4, '24 GB 1080'],
+    [autoWorkers(1000, '4k', m(24, 4), 10).n, 4, '24 GB 4K'],
+    [autoWorkers(1000, '1080', m(16, 2), 10).n, 4, '16 GB 1080'],
+    [autoWorkers(1000, '4k', m(16, 2), 10).n, 3, '16 GB 4K'],
+    [autoWorkers(1000, '1080', m(8, 1), 10).n, 2, '8 GB 1080'],
+    [autoWorkers(1000, '4k', m(8, 1), 10).n, 1, '8 GB 4K'],
+    [autoWorkers(1000, '4k', m(2, 0.2), 10).n, 1, '2 GB 4K (mínimo 1)'],
+    [autoWorkers(1000, '1080', m(64, 40), 4).n, 2, '4 núcleos'],
+    [autoWorkers(45, '1080', m(64, 40), 10).n, 2, '45 cuadros'],
+    [resolveWorkers(3, 2), 2, 'explícito acotado a los cuadros'],
+  ];
+  const badW = cases.filter(([got, want]) => got !== want);
+  check(!badW.length, `workers auto: ${cases.length - badW.length}/${cases.length} casos${badW.length ? ' (fallan: ' + badW.map(([g, w, n]) => `${n}: ${g}≠${w}`).join('; ') + ')' : ''}`);
+}
+
 console.log(failures ? `✗ ${failures} chequeo(s) fallaron` : '✓ export en paralelo exacto');
 process.exit(failures ? 1 : 0);

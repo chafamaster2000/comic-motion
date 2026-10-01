@@ -58,11 +58,29 @@ async function preparePage(context, serverUrl, scale, browser, close) {
   return { browser, close, page, info, logs, shot };
 }
 
-// Cuántos navegadores en paralelo. 'auto': la mitad de los núcleos, hasta 4 (medido en una M4: más de 4 no rinde
-// porque la captura PNG y x264 compiten por CPU) y uno cada 30 cuadros como mucho (abrir un navegador cuesta ~2 s).
-export function resolveWorkers(workers, frames) {
+// Cuántos navegadores en paralelo. 'auto' toma el mínimo entre:
+//  - CPU: la mitad de los núcleos, hasta 4 (medido en una M4: más de 4 no rinde porque la captura PNG y x264 compiten);
+//  - RAM: un tramo (Chromium con GPU + su ffmpeg) ocupa ~1.25 GB a 1080 y ~1.5 GB a 4K (RSS medido con 4 en paralelo
+//    sobre una página de capas); se presupuesta con margen 1.5 GB y 2.5 GB (AUTO_GB) contra lo disponible, que es
+//    max(os.freemem(), la mitad de os.totalmem()): en macOS freemem no cuenta la caché que se libera sola, así que
+//    solo no alcanza. 24 GB → 4 a 1080 y a 4K; 16 GB → 4 y 3; 8 GB → 2 y 1.
+//  - uno cada 30 cuadros como mucho (abrir un navegador cuesta ~2 s).
+// Siempre al menos 1. Un número explícito se respeta (hasta 8).
+const AUTO_GB = { '1080': 1.5, '4k': 2.5 };
+export function autoWorkers(frames = Infinity, quality = '1080', mem = { total: os.totalmem(), free: os.freemem() }, cpus = os.cpus().length) {
+  const GB = 2 ** 30;
+  const per = AUTO_GB[quality] || AUTO_GB['1080'];
+  const availGB = Math.max(mem.free, mem.total / 2) / GB;
+  const byCpu = Math.min(4, Math.max(1, Math.floor(cpus / 2)));
+  const byMem = Math.max(1, Math.floor(availGB / per));
+  const byFrames = Math.max(1, Math.ceil(frames / 30));
+  const n = Math.max(1, Math.min(byCpu, byMem, byFrames));
+  const limit = n === byMem && byMem < byCpu ? 'memoria' : n === byFrames && byFrames < byCpu ? 'cuadros' : 'núcleos';
+  return { n, limit, byCpu, byMem, availGB: Math.round(availGB * 10) / 10, perWorkerGB: per };
+}
+export function resolveWorkers(workers, frames, quality = '1080') {
   const auto = workers === undefined || workers === null || workers === 'auto' || workers === 0;
-  let n = auto ? Math.min(4, Math.max(1, Math.floor(os.cpus().length / 2)), Math.ceil(frames / 30)) : Math.floor(+workers);
+  let n = auto ? autoWorkers(frames, quality).n : Math.floor(+workers);
   if (!Number.isFinite(n) || n < 1) n = 1;
   return Math.max(1, Math.min(n, 8, frames));
 }
@@ -135,7 +153,7 @@ export async function renderVideo({ serverUrl, meta, outFile, quality = '1080', 
   const duration = await sceneDuration(serverUrl);
   const end = Math.min(to ?? duration, duration);
   const frames = Math.max(1, Math.round((end - from) * fps));
-  const n = resolveWorkers(workers, frames);
+  const n = resolveWorkers(workers, frames, quality);
   const t0 = Date.now();
 
   let failed = null;
@@ -175,7 +193,8 @@ export async function renderVideo({ serverUrl, meta, outFile, quality = '1080', 
     }
   } catch (e) {
     if (shouldStop?.() && e.message !== 'cancelado') e = new Error('cancelado');
-    if (n > 1) fs.rmSync(outFile, { force: true });
+    // sin archivo a medias (en serie ffmpeg escribe directo en outFile)
+    fs.rmSync(outFile, { force: true });
     throw e;
   } finally {
     await Promise.race([Promise.all([...closers].map((c) => c())), new Promise((r) => setTimeout(r, 5000))]);

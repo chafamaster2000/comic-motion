@@ -77,6 +77,45 @@ export const TSL_FILTERS = {
       return vec4(r, color.g, b, color.a);
     },
   },
+  // Contorno de tinta: misma cadena que el SVG del DOM (presets.js `ink`), en el mismo orden y con el mismo
+  // redondeo a 8 bits entre primitivas: gris (0.33·(r+g+b)) → Laplaciano 3×3 (8·centro − vecinos, bordes
+  // duplicados) → tabla discreta de 12 escalones → multiply con la imagen. El filtro del DOM trabaja en los
+  // píxeles de su superficie (px de dispositivo a lo largo de los ejes de la caja): los vecinos están a
+  // 1 px de dispositivo de distancia en esos ejes.
+  ink: {
+    sample: true,
+    node({ color, sample, params, h }) {
+      const strength = params.strength ?? 5;
+      const thr = params.threshold ?? 0.35;
+      // tableValues discretos: escalón k (0..11) negro si k/11 > thr/(strength/5); v = byte/255, k = floor(12·v)
+      const kmin = Math.floor((11 * thr) / (strength / 5)) + 1;
+      if (kmin > 11) return color;
+      const q8 = (x) => floor(x.mul(255).add(0.5)).div(255);
+      const gray = (c) => q8(clamp(c.r.add(c.g).add(c.b).mul(0.33), 0, 1));
+      const step = float(1).div(h.pxScale); // 1 px de dispositivo en px locales
+      const lo = vec2(step.mul(0.5));
+      const hi = h.inner.sub(lo);
+      const grayAt = (L) => gray(sample(h.pageToUv(h.pagePos.add(clamp(L, lo, hi).sub(h.localPos)))));
+      // línea (0 = tinta) del filtro evaluado en el punto local P
+      const lineAt = (P) => {
+        let nb = float(0);
+        for (const [dx, dy] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) nb = nb.add(grayAt(P.add(vec2(dx, dy).mul(step))));
+        const e = q8(clamp(grayAt(P).mul(8).sub(nb), 0, 1));
+        return float(1).sub(TSL.step(kmin / 12 - 1e-4, e));
+      };
+      // caja alineada con la pantalla: el filtro en el píxel mismo
+      const lineAxis = lineAt(h.localPos);
+      // caja rotada: Chrome calcula el filtro en una grilla alineada con la caja (px de dispositivo) y después
+      // la re-muestrea rotada (bilineal): evaluamos los 4 píxeles de esa grilla e interpolamos
+      const g = h.localPos.div(step).sub(0.5);
+      const g0 = floor(g);
+      const f = g.sub(g0);
+      const ctr = (ox, oy) => g0.add(vec2(ox + 0.5, oy + 0.5)).mul(step);
+      const lineRot = mix(mix(lineAt(ctr(0, 0)), lineAt(ctr(1, 0)), f.x), mix(lineAt(ctr(0, 1)), lineAt(ctr(1, 1)), f.x), f.y);
+      const line = TSL.select(h.rotated, lineRot, lineAxis);
+      return vec4(color.rgb.mul(line), color.a);
+    },
+  },
   paper: {
     node({ color, params, h }) {
       const sep = params.sepia ?? 0.35;
